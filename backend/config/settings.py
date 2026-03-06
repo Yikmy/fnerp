@@ -15,6 +15,7 @@ INSTALLED_APPS = [
     "shared",
     "company",
     "rbac",
+    "doc",
 ]
 
 MIDDLEWARE = [
