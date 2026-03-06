@@ -17,6 +17,7 @@ INSTALLED_APPS = [
     "rbac",
     "doc",
     "audit",
+    "system_config",
 ]
 
 MIDDLEWARE = [
@@ -61,3 +62,11 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "erp-system-config-cache",
+    }
+}
