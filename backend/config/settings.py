@@ -16,6 +16,7 @@ INSTALLED_APPS = [
     "company",
     "rbac",
     "doc",
+    "audit",
 ]
 
 MIDDLEWARE = [

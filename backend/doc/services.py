@@ -1,5 +1,6 @@
 from django.db import transaction
 
+from audit.services import AuditService
 from doc.models import DocumentStateMachineDef, DocumentTransitionLog
 from shared.constants.document import DOC_STATUS
 from shared.exceptions import BusinessRuleError, ValidationError
@@ -41,6 +42,7 @@ class DocumentStateTransitionService(BaseService):
         document_type: str,
         to_state: str,
         notes: str = "",
+        request=None,
     ):
         from_state = getattr(document, "status", None)
         if from_state is None:
@@ -67,6 +69,16 @@ class DocumentStateTransitionService(BaseService):
             to_state=to_state,
             operator_id=getattr(user, "id", None),
             notes=notes,
+        )
+
+        AuditService.log_state_transition(
+            actor_id=getattr(user, "id", None),
+            company_id=company_id,
+            resource_type=document_type,
+            resource_id=document.id,
+            from_state=from_state,
+            to_state=to_state,
+            request=request,
         )
 
         return document
