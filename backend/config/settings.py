@@ -27,6 +27,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "shared.middleware.request_audit.RequestAuditMiddleware",
     "shared.middleware.company_scope.CompanyScopeMiddleware",
 ]
 

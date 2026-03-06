@@ -3,6 +3,7 @@ from django.db import transaction
 from audit.services import AuditService
 from doc.models import DocumentStateMachineDef, DocumentTransitionLog
 from shared.constants.document import DOC_STATUS
+from shared.constants.permissions import PERMISSION_CODES
 from shared.exceptions import BusinessRuleError, ValidationError
 from shared.services.base import BaseService
 
@@ -12,7 +13,7 @@ class DocumentStateTransitionService(BaseService):
         DOC_STATUS.DRAFT: {DOC_STATUS.SUBMITTED, DOC_STATUS.CANCELLED},
         DOC_STATUS.SUBMITTED: {DOC_STATUS.CONFIRMED, DOC_STATUS.CANCELLED},
         DOC_STATUS.CONFIRMED: {DOC_STATUS.COMPLETED, DOC_STATUS.CANCELLED},
-        DOC_STATUS.COMPLETED: set(),
+        DOC_STATUS.COMPLETED: {DOC_STATUS.CANCELLED},
         DOC_STATUS.CANCELLED: set(),
     }
 
@@ -55,6 +56,9 @@ class DocumentStateTransitionService(BaseService):
         )
 
         permission_code = transition_def.permission_code if transition_def else ""
+        if not permission_code and from_state == DOC_STATUS.COMPLETED and to_state == DOC_STATUS.CANCELLED:
+            permission_code = PERMISSION_CODES.DOC_CANCEL_COMPLETED
+
         if permission_code:
             self.ensure_permission(user=user, company_id=company_id, permission_code=permission_code)
 
