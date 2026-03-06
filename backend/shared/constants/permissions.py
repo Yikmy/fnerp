@@ -6,3 +6,4 @@ class PERMISSION_CODES(StrEnum):
     DOC_CONFIRM = "doc.document.confirm"
     DOC_COMPLETE = "doc.document.complete"
     DOC_CANCEL = "doc.document.cancel"
+    DOC_CANCEL_COMPLETED = "doc.cancel.completed"
