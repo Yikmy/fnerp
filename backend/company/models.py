@@ -24,7 +24,7 @@ class CompanyMembership(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="company_memberships")
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="memberships")
-    role_code = models.CharField(max_length=100, blank=True)
+    role = models.ForeignKey("rbac.Role", null=True, blank=True, on_delete=models.SET_NULL, related_name="memberships")
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
