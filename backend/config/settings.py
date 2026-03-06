@@ -13,6 +13,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "shared",
+    "company",
 ]
 
 MIDDLEWARE = [
@@ -22,6 +23,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "shared.middleware.company_scope.CompanyScopeMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
