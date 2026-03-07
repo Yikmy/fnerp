@@ -2,6 +2,8 @@ from decimal import Decimal
 
 from django.db import transaction
 
+from shared.constants.modules import MODULE_CODES
+from shared.constants.permissions import PERMISSION_CODES
 from shared.exceptions import BusinessRuleError
 from shared.services.base import BaseService
 from shared.services.module_guard import ModuleGuardService
@@ -9,31 +11,33 @@ from shared.services.module_guard import ModuleGuardService
 from .models import BinLocation, Material, MaterialCategory, UoM, Warehouse, WarehouseZone
 
 
-class MaterialMasterDataService(BaseService):
-    MODULE_CODE = "material"
-
-    PERM_CREATE_UOM = "material.uom.create"
-    PERM_CREATE_CATEGORY = "material.category.create"
-    PERM_CREATE_MATERIAL = "material.material.create"
-    PERM_CREATE_WAREHOUSE = "material.warehouse.create"
-    PERM_CREATE_BIN = "material.bin.create"
+class MaterialDomainService(BaseService):
+    MODULE_CODE = MODULE_CODES.MATERIAL
 
     def _ensure_module_enabled(self, *, company_id):
         if not ModuleGuardService.check_module_enabled(company_id=company_id, module_code=self.MODULE_CODE):
             raise BusinessRuleError("material module is disabled for this company")
 
+    @staticmethod
+    def _user_id(user):
+        return getattr(user, "id", None)
+
+
+class UomService(MaterialDomainService):
+    PERM_CREATE = PERMISSION_CODES.MATERIAL_UOM_CREATE
+
     @transaction.atomic
     def create_uom(self, *, user, company_id, name: str, symbol: str, ratio_to_base: Decimal, request=None) -> UoM:
         self._ensure_module_enabled(company_id=company_id)
-        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_UOM)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
 
         uom = UoM(
             company_id=company_id,
             name=name,
             symbol=symbol,
             ratio_to_base=ratio_to_base,
-            created_by=getattr(user, "id", None),
-            updated_by=getattr(user, "id", None),
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
         )
         uom.full_clean()
         uom.save()
@@ -56,10 +60,14 @@ class MaterialMasterDataService(BaseService):
         base_quantity = quantity * from_uom.ratio_to_base
         return base_quantity / to_uom.ratio_to_base
 
+
+class MaterialCategoryService(MaterialDomainService):
+    PERM_CREATE = PERMISSION_CODES.MATERIAL_CATEGORY_CREATE
+
     @transaction.atomic
     def create_material_category(self, *, user, company_id, name: str, parent_id=None, request=None) -> MaterialCategory:
         self._ensure_module_enabled(company_id=company_id)
-        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_CATEGORY)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
 
         parent = None
         if parent_id:
@@ -71,8 +79,8 @@ class MaterialMasterDataService(BaseService):
             company_id=company_id,
             name=name,
             parent=parent,
-            created_by=getattr(user, "id", None),
-            updated_by=getattr(user, "id", None),
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
         )
         category.full_clean()
         category.save()
@@ -156,6 +164,10 @@ class MaterialMasterDataService(BaseService):
 
         return _build(root)
 
+
+class MaterialService(MaterialDomainService):
+    PERM_CREATE = PERMISSION_CODES.MATERIAL_MATERIAL_CREATE
+
     @transaction.atomic
     def create_material(
         self,
@@ -173,7 +185,7 @@ class MaterialMasterDataService(BaseService):
         request=None,
     ) -> Material:
         self._ensure_module_enabled(company_id=company_id)
-        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_MATERIAL)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
 
         category = MaterialCategory.objects.active().for_company(company_id).filter(id=category_id).first()
         if category is None:
@@ -193,8 +205,8 @@ class MaterialMasterDataService(BaseService):
             tracking=tracking,
             is_container=is_container,
             is_active=is_active,
-            created_by=getattr(user, "id", None),
-            updated_by=getattr(user, "id", None),
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
         )
         material.full_clean()
         material.save()
@@ -209,18 +221,22 @@ class MaterialMasterDataService(BaseService):
         )
         return material
 
+
+class WarehouseService(MaterialDomainService):
+    PERM_CREATE = PERMISSION_CODES.MATERIAL_WAREHOUSE_CREATE
+
     @transaction.atomic
     def create_warehouse(self, *, user, company_id, code: str, name: str, address: str = "", request=None) -> Warehouse:
         self._ensure_module_enabled(company_id=company_id)
-        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_WAREHOUSE)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
 
         warehouse = Warehouse(
             company_id=company_id,
             code=code,
             name=name,
             address=address,
-            created_by=getattr(user, "id", None),
-            updated_by=getattr(user, "id", None),
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
         )
         warehouse.full_clean()
         warehouse.save()
@@ -235,10 +251,15 @@ class MaterialMasterDataService(BaseService):
         )
         return warehouse
 
+
+class BinLocationService(MaterialDomainService):
+    PERM_CREATE_ZONE = PERMISSION_CODES.MATERIAL_WAREHOUSE_ZONE_CREATE
+    PERM_CREATE_BIN_LOCATION = PERMISSION_CODES.MATERIAL_BIN_LOCATION_CREATE
+
     @transaction.atomic
     def create_warehouse_zone(self, *, user, company_id, warehouse_id, code: str, name: str, request=None) -> WarehouseZone:
         self._ensure_module_enabled(company_id=company_id)
-        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_BIN)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_ZONE)
 
         warehouse = Warehouse.objects.active().for_company(company_id).filter(id=warehouse_id).first()
         if warehouse is None:
@@ -249,8 +270,8 @@ class MaterialMasterDataService(BaseService):
             warehouse=warehouse,
             code=code,
             name=name,
-            created_by=getattr(user, "id", None),
-            updated_by=getattr(user, "id", None),
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
         )
         zone.full_clean()
         zone.save()
@@ -278,7 +299,7 @@ class MaterialMasterDataService(BaseService):
         request=None,
     ) -> BinLocation:
         self._ensure_module_enabled(company_id=company_id)
-        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_BIN)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE_BIN_LOCATION)
 
         warehouse = Warehouse.objects.active().for_company(company_id).filter(id=warehouse_id).first()
         if warehouse is None:
@@ -296,8 +317,8 @@ class MaterialMasterDataService(BaseService):
             zone=zone,
             code=code,
             name=name,
-            created_by=getattr(user, "id", None),
-            updated_by=getattr(user, "id", None),
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
         )
         bin_location.full_clean()
         bin_location.save()
@@ -311,3 +332,44 @@ class MaterialMasterDataService(BaseService):
             request=request,
         )
         return bin_location
+
+
+class MaterialMasterDataService(BaseService):
+    """Compatibility facade delegating to STEP2 subdomain services."""
+
+    def __init__(self):
+        self.uom_service = UomService()
+        self.category_service = MaterialCategoryService()
+        self.material_service = MaterialService()
+        self.warehouse_service = WarehouseService()
+        self.bin_location_service = BinLocationService()
+
+    def create_uom(self, **kwargs):
+        return self.uom_service.create_uom(**kwargs)
+
+    def convert_quantity(self, **kwargs):
+        return self.uom_service.convert_quantity(**kwargs)
+
+    def create_material_category(self, **kwargs):
+        return self.category_service.create_material_category(**kwargs)
+
+    def get_category_descendants(self, **kwargs):
+        return self.category_service.get_category_descendants(**kwargs)
+
+    def get_category_ancestors(self, **kwargs):
+        return self.category_service.get_category_ancestors(**kwargs)
+
+    def get_category_tree(self, **kwargs):
+        return self.category_service.get_category_tree(**kwargs)
+
+    def create_material(self, **kwargs):
+        return self.material_service.create_material(**kwargs)
+
+    def create_warehouse(self, **kwargs):
+        return self.warehouse_service.create_warehouse(**kwargs)
+
+    def create_warehouse_zone(self, **kwargs):
+        return self.bin_location_service.create_warehouse_zone(**kwargs)
+
+    def create_bin_location(self, **kwargs):
+        return self.bin_location_service.create_bin_location(**kwargs)
