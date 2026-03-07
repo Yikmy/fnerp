@@ -8,3 +8,4 @@ class MODULE_CODES(StrEnum):
     DOC = "doc"
     AUDIT = "audit"
     CONFIG = "config"
+    MATERIAL = "material"
