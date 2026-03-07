@@ -37,12 +37,9 @@ auth/
 doc/
 audit/
 config/
-
-```
 shared/
 ```
 
-```
 
 These directories together form the **ERP Kernel Layer**.
 
