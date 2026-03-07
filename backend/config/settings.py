@@ -18,6 +18,7 @@ INSTALLED_APPS = [
     "doc",
     "audit",
     "system_config",
+    "apps.material",
 ]
 
 MIDDLEWARE = [
