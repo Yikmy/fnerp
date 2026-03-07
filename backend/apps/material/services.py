@@ -101,6 +101,61 @@ class MaterialMasterDataService(BaseService):
             pending_ids = [item.id for item in children]
         return descendants
 
+    def get_category_ancestors(self, *, company_id, category_id):
+        category = (
+            MaterialCategory.objects.active()
+            .for_company(company_id)
+            .filter(id=category_id)
+            .only("id", "name", "parent_id")
+            .first()
+        )
+        if category is None:
+            raise BusinessRuleError("Category not found in company scope")
+
+        ancestors = []
+        parent_id = category.parent_id
+        while parent_id is not None:
+            parent = (
+                MaterialCategory.objects.active()
+                .for_company(company_id)
+                .filter(id=parent_id)
+                .only("id", "name", "parent_id")
+                .first()
+            )
+            if parent is None:
+                break
+            ancestors.append(parent)
+            parent_id = parent.parent_id
+        return ancestors
+
+    def get_category_tree(self, *, company_id, category_id):
+        root = (
+            MaterialCategory.objects.active()
+            .for_company(company_id)
+            .filter(id=category_id)
+            .only("id", "name", "parent_id")
+            .first()
+        )
+        if root is None:
+            raise BusinessRuleError("Category not found in company scope")
+
+        descendants = self.get_category_descendants(company_id=company_id, category_id=category_id)
+        nodes = [root, *descendants]
+        nodes_by_parent = {}
+        for node in nodes:
+            nodes_by_parent.setdefault(node.parent_id, []).append(node)
+
+        def _build(node):
+            children = [_build(child) for child in nodes_by_parent.get(node.id, [])]
+            return {
+                "id": str(node.id),
+                "name": node.name,
+                "parent_id": str(node.parent_id) if node.parent_id else None,
+                "children": children,
+            }
+
+        return _build(root)
+
     @transaction.atomic
     def create_material(
         self,

@@ -39,8 +39,20 @@ class MaterialCategory(BaseModel):
         unique_together = (("company_id", "name", "parent"),)
 
     def clean(self):
-        if self.parent_id and self.parent.company_id != self.company_id:
+        if not self.parent_id:
+            return
+
+        if self.parent.company_id != self.company_id:
             raise DjangoValidationError({"parent": "Parent category company must match."})
+
+        if self.parent_id == self.id:
+            raise DjangoValidationError({"parent": "Category cannot be parent of itself."})
+
+        ancestor = self.parent
+        while ancestor is not None:
+            if ancestor.id == self.id:
+                raise DjangoValidationError({"parent": "Cyclic category hierarchy is not allowed."})
+            ancestor = ancestor.parent
 
 
 class Material(BaseModel):
