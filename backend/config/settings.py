@@ -19,6 +19,7 @@ INSTALLED_APPS = [
     "audit",
     "system_config",
     "apps.material",
+    "apps.inventory",
 ]
 
 MIDDLEWARE = [
