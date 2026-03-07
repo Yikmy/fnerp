@@ -10,14 +10,25 @@ from shared.services.base import BaseService
 
 class DocumentStateTransitionService(BaseService):
     DEFAULT_TRANSITIONS = {
-        DOC_STATUS.DRAFT: {DOC_STATUS.SUBMITTED, DOC_STATUS.CANCELLED},
-        DOC_STATUS.SUBMITTED: {DOC_STATUS.CONFIRMED, DOC_STATUS.CANCELLED},
-        DOC_STATUS.CONFIRMED: {DOC_STATUS.COMPLETED, DOC_STATUS.CANCELLED},
-        DOC_STATUS.COMPLETED: {DOC_STATUS.CANCELLED},
-        DOC_STATUS.CANCELLED: set(),
+        DOC_STATUS.DRAFT: {
+            DOC_STATUS.SUBMITTED: PERMISSION_CODES.DOC_SUBMIT,
+            DOC_STATUS.CANCELLED: PERMISSION_CODES.DOC_CANCEL,
+        },
+        DOC_STATUS.SUBMITTED: {
+            DOC_STATUS.CONFIRMED: PERMISSION_CODES.DOC_CONFIRM,
+            DOC_STATUS.CANCELLED: PERMISSION_CODES.DOC_CANCEL,
+        },
+        DOC_STATUS.CONFIRMED: {
+            DOC_STATUS.COMPLETED: PERMISSION_CODES.DOC_COMPLETE,
+            DOC_STATUS.CANCELLED: PERMISSION_CODES.DOC_CANCEL,
+        },
+        DOC_STATUS.COMPLETED: {
+            DOC_STATUS.CANCELLED: PERMISSION_CODES.DOC_CANCEL_COMPLETED,
+        },
+        DOC_STATUS.CANCELLED: {},
     }
 
-    def validate_transition(self, *, document_type: str, from_state: str, to_state: str) -> DocumentStateMachineDef | None:
+    def validate_transition(self, *, document_type: str, from_state: str, to_state: str) -> str:
         transition = DocumentStateMachineDef.objects.filter(
             document_type=document_type,
             from_state=from_state,
@@ -25,13 +36,18 @@ class DocumentStateTransitionService(BaseService):
             is_active=True,
         ).first()
         if transition:
-            return transition
+            if not transition.permission_code:
+                raise ValidationError(
+                    f"Transition permission_code is required: {from_state} -> {to_state}"
+                )
+            return transition.permission_code
 
-        allowed_next_states = self.DEFAULT_TRANSITIONS.get(from_state, set())
-        if to_state not in allowed_next_states:
+        default_transitions = self.DEFAULT_TRANSITIONS.get(from_state, {})
+        permission_code = default_transitions.get(to_state)
+        if not permission_code:
             raise ValidationError(f"Invalid transition: {from_state} -> {to_state}")
 
-        return None
+        return permission_code
 
     @transaction.atomic
     def transition(
@@ -49,18 +65,12 @@ class DocumentStateTransitionService(BaseService):
         if from_state is None:
             raise BusinessRuleError("Document has no status field")
 
-        transition_def = self.validate_transition(
+        permission_code = self.validate_transition(
             document_type=document_type,
             from_state=from_state,
             to_state=to_state,
         )
-
-        permission_code = transition_def.permission_code if transition_def else ""
-        if not permission_code and from_state == DOC_STATUS.COMPLETED and to_state == DOC_STATUS.CANCELLED:
-            permission_code = PERMISSION_CODES.DOC_CANCEL_COMPLETED
-
-        if permission_code:
-            self.ensure_permission(user=user, company_id=company_id, permission_code=permission_code)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=permission_code)
 
         document.status = to_state
         document.save(update_fields=["status", "updated_at"])
