@@ -75,7 +75,7 @@ class Material(BaseModel):
         constraints = [
             models.UniqueConstraint(fields=["company_id", "code"], name="uq_md_material_company_code"),
             models.CheckConstraint(
-                check=models.Q(tracking__in=[TrackingType.NONE, TrackingType.LOT, TrackingType.SERIAL]),
+                check=models.Q(tracking__in=["none", "lot", "serial"]),
                 name="ck_md_material_tracking_valid",
             ),
         ]

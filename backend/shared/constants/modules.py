@@ -1,4 +1,4 @@
-from enum import StrEnum
+from .enum_compat import StrEnum
 
 
 class MODULE_CODES(StrEnum):
