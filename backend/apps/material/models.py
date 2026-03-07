@@ -72,7 +72,13 @@ class Material(BaseModel):
 
     class Meta:
         db_table = "md_material"
-        unique_together = (("company_id", "code"),)
+        constraints = [
+            models.UniqueConstraint(fields=["company_id", "code"], name="uq_md_material_company_code"),
+            models.CheckConstraint(
+                check=models.Q(tracking__in=[TrackingType.NONE, TrackingType.LOT, TrackingType.SERIAL]),
+                name="ck_md_material_tracking_valid",
+            ),
+        ]
 
     def clean(self):
         errors = {}
