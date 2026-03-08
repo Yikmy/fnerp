@@ -501,14 +501,14 @@ class StockCountService(InventoryDomainService):
         for line in count.lines.all():
             if line.diff_qty == 0:
                 continue
-            movement_type = StockLedger.MovementType.IN if line.diff_qty > 0 else StockLedger.MovementType.ADJUST
+            movement_type = StockLedger.MovementType.IN if line.diff_qty > 0 else StockLedger.MovementType.OUT
             self.ledger_service.record_movement(
                 user=user,
                 company_id=company_id,
                 warehouse_id=count.warehouse_id,
                 material_id=line.material_id,
                 movement_type=movement_type,
-                qty=line.diff_qty if line.diff_qty < 0 else abs(line.diff_qty),
+                qty=abs(line.diff_qty),
                 uom_id=line.material.uom_id,
                 ref_doc_type="stock_count",
                 ref_doc_id=count.id,
