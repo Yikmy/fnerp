@@ -14,3 +14,13 @@ class PERMISSION_CODES(StrEnum):
     MATERIAL_WAREHOUSE_CREATE = "material.warehouse.create"
     MATERIAL_WAREHOUSE_ZONE_CREATE = "material.warehouse_zone.create"
     MATERIAL_BIN_LOCATION_CREATE = "material.bin_location.create"
+    INVENTORY_STOCK_LEDGER_WRITE = "inventory.stock_ledger.write"
+    INVENTORY_RESERVATION_CREATE = "inventory.reservation.create"
+    INVENTORY_RESERVATION_RELEASE = "inventory.reservation.release"
+    INVENTORY_RESERVATION_CONSUME = "inventory.reservation.consume"
+    INVENTORY_TRANSFER_CREATE = "inventory.transfer.create"
+    INVENTORY_TRANSFER_SHIP = "inventory.transfer.ship"
+    INVENTORY_TRANSFER_RECEIVE = "inventory.transfer.receive"
+    INVENTORY_STOCK_COUNT_CREATE = "inventory.stock_count.create"
+    INVENTORY_STOCK_COUNT_POST = "inventory.stock_count.post"
+

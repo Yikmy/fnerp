@@ -9,3 +9,4 @@ class MODULE_CODES(StrEnum):
     AUDIT = "audit"
     CONFIG = "config"
     MATERIAL = "material"
+    INVENTORY = "inventory"
