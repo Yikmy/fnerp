@@ -1,11 +1,12 @@
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from apps.inventory.models import StockBalance, StockLedger
 from apps.material.models import Material, MaterialCategory, UoM, Warehouse
-from apps.purchase.models import InvoiceMatch
+from apps.purchase.models import GoodsReceiptLine, InvoiceMatch
 from apps.purchase.services import APMatchingService, GoodsReceiptService, PurchaseOrderService, VendorService
 from company.models import Company, CompanyMembership, CompanyModule
 from doc.models import DocumentStateMachineDef
@@ -124,6 +125,60 @@ class PurchaseEngineTests(TestCase):
         balance = StockBalance.objects.get(company_id=self.company.id, warehouse=self.warehouse, material=self.material)
         self.assertEqual(ledger.qty, Decimal("5"))
         self.assertEqual(balance.on_hand_qty, Decimal("5"))
+
+
+    def test_grn_line_requires_same_material_as_po_line(self):
+        vendor = VendorService().create_vendor(
+            user=self.user,
+            company_id=self.company.id,
+            code="V002",
+            name="Vendor 2",
+        )
+        other_material = Material.objects.create(
+            company_id=self.company.id,
+            code="MAT-2",
+            name="Material 2",
+            category=self.category,
+            uom=self.uom,
+        )
+
+        po_service = PurchaseOrderService()
+        po = po_service.create_purchase_order(
+            user=self.user,
+            company_id=self.company.id,
+            doc_no="PO-002",
+            vendor_id=vendor.id,
+            lines=[
+                {
+                    "material_id": self.material.id,
+                    "qty": Decimal("2"),
+                    "price": Decimal("3"),
+                    "warehouse_id": self.warehouse.id,
+                }
+            ],
+        )
+        po_service.transition_order(user=self.user, company_id=self.company.id, po_id=po.id, to_state=DOC_STATUS.SUBMITTED)
+        po_service.transition_order(user=self.user, company_id=self.company.id, po_id=po.id, to_state=DOC_STATUS.CONFIRMED)
+
+        grn = GoodsReceiptService().create_goods_receipt(
+            user=self.user,
+            company_id=self.company.id,
+            doc_no="GRN-002",
+            po_id=po.id,
+            received_date="2026-03-08",
+            warehouse_id=self.warehouse.id,
+            lines=[],
+        )
+
+        grn_line = GoodsReceiptLine(
+            grn=grn,
+            po_line=po.lines.first(),
+            material=other_material,
+            received_qty=Decimal("1"),
+        )
+
+        with self.assertRaises(ValidationError):
+            grn_line.full_clean()
 
     def test_invoice_match_placeholder_model(self):
         match = APMatchingService().create_invoice_match(

@@ -191,6 +191,8 @@ class GoodsReceiptLine(models.Model):
         errors = {}
         if self.grn_id and self.po_line_id and self.grn.po_id != self.po_line.po_id:
             errors["po_line"] = "PO line must belong to GRN purchase order."
+        if self.po_line_id and self.material_id and self.po_line.material_id != self.material_id:
+            errors["material"] = "Material must match PO line material."
         if self.grn_id and self.material_id and self.grn.company_id != self.material.company_id:
             errors["material"] = "Material company must match GRN company."
         if self.received_qty is not None and self.received_qty <= 0:
