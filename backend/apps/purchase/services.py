@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 
 from apps.inventory.models import StockLedger
 from apps.inventory.services import StockLedgerService
@@ -299,11 +300,21 @@ class GoodsReceiptService(PurchaseDomainService):
             if po_line is None:
                 raise BusinessRuleError("PO line not found in purchase order")
 
+            existing_received = (
+                GoodsReceiptLine.objects.filter(po_line=po_line)
+                .aggregate(total=Sum("received_qty"))
+                .get("total")
+                or Decimal("0")
+            )
+            requested_qty = line["received_qty"]
+            if existing_received + requested_qty > po_line.qty:
+                raise BusinessRuleError("Received quantity cannot exceed PO line quantity")
+
             grn_line = GoodsReceiptLine(
                 grn=grn,
                 po_line=po_line,
                 material=self._material(company_id=company_id, material_id=line["material_id"]),
-                received_qty=line["received_qty"],
+                received_qty=requested_qty,
                 lot_id=line.get("lot_id"),
                 serial_id=line.get("serial_id"),
             )
@@ -328,8 +339,19 @@ class GoodsReceiptService(PurchaseDomainService):
             raise BusinessRuleError("Goods receipt not found in company scope")
 
         if to_state == DOC_STATUS.COMPLETED:
+            grn = GoodsReceipt.objects.select_for_update().active().for_company(company_id).filter(id=grn_id).first()
+            if grn is None:
+                raise BusinessRuleError("Goods receipt not found in company scope")
+            if grn.status == DOC_STATUS.COMPLETED:
+                return grn
             if grn.status != DOC_STATUS.CONFIRMED:
                 raise BusinessRuleError("Goods receipt must be confirmed before completion")
+            if StockLedger.objects.filter(
+                company_id=company_id,
+                ref_doc_type="purchase.goods_receipt",
+                ref_doc_id=grn.id,
+            ).exists():
+                raise BusinessRuleError("Goods receipt inventory already posted")
             self._post_inventory(user=user, company_id=company_id, grn=grn, request=request)
 
         return self.transition_service.transition(
@@ -408,14 +430,22 @@ class APMatchingService(PurchaseDomainService):
             po = PurchaseOrder.objects.active().for_company(company_id).filter(id=po_id).first()
             if po is None:
                 raise BusinessRuleError("Purchase order not found in company scope")
+            if po.company_id != company_id:
+                raise BusinessRuleError("Purchase order company mismatch")
 
         grn = None
         if grn_id:
             grn = GoodsReceipt.objects.active().for_company(company_id).filter(id=grn_id).first()
             if grn is None:
                 raise BusinessRuleError("Goods receipt not found in company scope")
+            if grn.company_id != company_id:
+                raise BusinessRuleError("Goods receipt company mismatch")
+
+        if po and grn and po.company_id != grn.company_id:
+            raise BusinessRuleError("PO and GRN company mismatch")
 
         match = InvoiceMatch(
+            company_id=company_id,
             invoice_id=invoice_id,
             po=po,
             grn=grn,
