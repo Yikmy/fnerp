@@ -236,7 +236,61 @@ frozen
 - Do not weaken company-scope, permission, module-guard, audit, or append-only inventory semantics.
 - Do not treat unfinished future inventory capabilities as already frozen.
 
-## 7. Inherited Rules for All Later Steps
+## 7. STEP4_PURCHASE_ENGINE (Frozen)
+### status
+frozen
+
+### owned scope
+- Purchase app ownership in `backend/apps/purchase/**`.
+- Entity ownership includes:
+  - `Vendor`
+  - `VendorHistory`
+  - `RFQTask`
+  - `RFQLine`
+  - `RFQQuote`
+  - `PurchaseOrder`
+  - `PurchaseOrderLine`
+  - `GoodsReceipt`
+  - `GoodsReceiptLine`
+  - `IQCRecord`
+  - `InvoiceMatch` (purchase-side matching support / placeholder scope only; not accounting ownership)
+
+### depends on
+- STEP1_KERNEL:
+  - company scope and RBAC contracts,
+  - module guard,
+  - audit pipeline,
+  - shared service-layer base,
+  - document-state lifecycle contracts.
+- STEP2_MASTER_DATA:
+  - `Material`, `Warehouse`, and related master data by reference only.
+- STEP3_INVENTORY_ENGINE:
+  - inventory service boundary for stock side effects,
+  - ledger posting and inventory consistency ownership.
+
+### forbidden downstream behavior
+- Do not duplicate STEP2 master data in STEP4.
+- Do not create parallel `Material` / `Warehouse` / `BinLocation`-like master tables in STEP4.
+- Do not move purchase workflow ownership into STEP2 or STEP3 apps.
+- Do not implement direct stock-balance mutation or inventory-calculation logic inside STEP4.
+- Do not take over accounting ownership beyond AP matching placeholder/support scope.
+- Do not introduce reverse dependency from STEP1/STEP2/STEP3 back to STEP4.
+- Do not bypass shared document lifecycle conventions with isolated ad hoc workflow semantics.
+
+### document / workflow contract
+- Purchase documents must remain company-scoped.
+- Permission and module-guard compatibility with STEP1 contracts is required.
+- Audit compatibility for purchase workflows is required.
+- `PurchaseOrder`, `GoodsReceipt`, and related documents must remain compatible with shared document-state transition patterns.
+- `GoodsReceipt` stock effects must go through STEP3 inventory ownership boundary and service orchestration.
+
+### downstream rule
+- STEP5+ may depend on STEP4 purchase entities/services.
+- STEP5+ must not rewrite STEP4 ownership boundaries.
+- STEP5+ integration with purchase records must use references and service boundaries.
+- STEP5+ must not move STEP4 purchase workflows into non-purchase domains.
+
+## 8. Inherited Rules for All Later Steps
 - Dependency direction is one-way: earlier frozen steps -> later steps only.
 - Company scope is mandatory for business records and request handling.
 - Service-layer pattern is required; downstream business logic belongs in services.
@@ -246,7 +300,7 @@ frozen
 - Workflow backflow into earlier frozen domains is prohibited.
 - Business app API surfaces are incrementally extensible and are not globally frozen by root API foundation alone.
 
-## 8. Downstream Implementation Rule
+## 9. Downstream Implementation Rule
 - STEP3+ must use completed steps as frozen dependencies.
 - Extend capabilities through new apps and new services in later steps.
 - Do not rewrite earlier-step ownership boundaries unless a compatibility fix is explicitly required and reported.
