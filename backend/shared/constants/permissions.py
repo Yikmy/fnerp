@@ -30,3 +30,10 @@ class PERMISSION_CODES(StrEnum):
     PURCHASE_IQC_CREATE = "purchase.iqc.create"
     PURCHASE_AP_MATCH_CREATE = "purchase.ap_match.create"
 
+    SALES_CUSTOMER_CREATE = "sales.customer.create"
+    SALES_PRICING_CREATE = "sales.pricing.create"
+    SALES_QUOTE_CREATE = "sales.quote.create"
+    SALES_ORDER_CREATE = "sales.order.create"
+    SALES_SHIPMENT_CREATE = "sales.shipment.create"
+    SALES_RMA_CREATE = "sales.rma.create"
+
