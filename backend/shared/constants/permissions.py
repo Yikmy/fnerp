@@ -23,4 +23,10 @@ class PERMISSION_CODES(StrEnum):
     INVENTORY_TRANSFER_RECEIVE = "inventory.transfer.receive"
     INVENTORY_STOCK_COUNT_CREATE = "inventory.stock_count.create"
     INVENTORY_STOCK_COUNT_POST = "inventory.stock_count.post"
+    PURCHASE_VENDOR_CREATE = "purchase.vendor.create"
+    PURCHASE_RFQ_CREATE = "purchase.rfq.create"
+    PURCHASE_ORDER_CREATE = "purchase.order.create"
+    PURCHASE_GRN_CREATE = "purchase.grn.create"
+    PURCHASE_IQC_CREATE = "purchase.iqc.create"
+    PURCHASE_AP_MATCH_CREATE = "purchase.ap_match.create"
 

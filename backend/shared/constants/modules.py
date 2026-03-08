@@ -10,3 +10,4 @@ class MODULE_CODES(StrEnum):
     CONFIG = "config"
     MATERIAL = "material"
     INVENTORY = "inventory"
+    PURCHASE = "purchase"
