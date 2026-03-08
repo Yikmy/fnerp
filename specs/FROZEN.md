@@ -119,7 +119,124 @@ frozen
 - Do not create reverse dependency from STEP2 to later operational steps.
 - Do not weaken company-scope and validation constraints on STEP2 entities.
 
-## 5. Inherited Rules for All Later Steps
+## 5. API_FOUNDATION (Frozen)
+### status
+frozen
+
+### owned scope
+- Root API protocol and aggregation layer in `backend/api/**`.
+- Root URL aggregation entrypoint in project URL config (`/api/` include path).
+- Unified API success/error response envelope helpers.
+- Centralized API exception-to-HTTP mapping contract.
+- Minimal shared API helpers for authentication/session/JSON parsing concerns.
+- Session/cookie authentication foundation endpoints: `login`, `logout`, `session`.
+- Kernel-level API smoke foundation for session-cookie auth flow validation.
+
+### exported infrastructure
+- Unified API response contract (`success` envelope and `error` envelope shape).
+- Unified API exception mapping contract for API-facing failures.
+- Root API aggregation entrypoint for downstream per-app API includes.
+- Session/cookie authentication bootstrap for MVP API rollout.
+- Authenticated session verification path for smoke and health checks.
+- Per-app API include pattern for STEP1–STEP3 domain API exposure.
+
+### allowed downstream usage
+- Later steps may add `api/` packages under business apps and include them via root API aggregation.
+- Later app APIs may reuse root API response/exception/base helpers.
+- Downstream API rollout may depend on session bootstrap and kernel smoke foundation.
+- Business domain APIs remain owned by their app boundaries (`company`, `material`, `inventory`, and later steps).
+
+### forbidden downstream changes
+- Do not turn root API into a centralized business workflow hub.
+- Do not centralize all business views under `backend/api/**`.
+- Do not move business orchestration/workflow rules into root API helpers.
+- Do not bypass service-layer pattern by embedding workflow logic in API views.
+- Do not reinterpret this foundation as “full business API surface is frozen”.
+- Do not redefine the current session/cookie foundation into JWT/token architecture without explicit future redesign.
+- Do not weaken company-scope enforcement semantics for business routes.
+
+## 6. STEP3_INVENTORY_ENGINE (Frozen)
+### status
+frozen
+
+### owned scope
+- Inventory engine entities and workflows in `backend/apps/inventory/**`.
+- Entity ownership includes:
+  - `Lot`
+  - `Serial`
+  - `StockLedger`
+  - `StockBalance`
+  - `Reservation`
+  - `WarehouseTransfer`
+  - `WarehouseTransferLine`
+  - `StockCount`
+  - `StockCountLine`
+  - `CostLayer`
+- Direct orchestration services for these entities in `backend/apps/inventory/services.py`.
+
+### exported entities / dependencies
+- `StockLedger`
+  - Immutable append-only inventory movement source of truth.
+  - Stable movement types include `in|out|adjust|transfer_in|transfer_out`.
+  - Supports reference document linkage (`ref_doc_type`, `ref_doc_id`).
+  - Downstream writes must go through inventory service-layer operations.
+- `StockBalance`
+  - Operational maintained state for real-time inventory quantity.
+  - Stable formula: `available_qty = on_hand_qty - reserved_qty`.
+  - Downstream treats balance as service-maintained projection, not an independent source of truth.
+- `Lot` / `Serial`
+  - Operational tracking entities aligned with STEP2 material tracking identity.
+  - Used as inventory movement dimensions within STEP3 services.
+- `Reservation`
+  - Reservation lifecycle baseline includes `active`, `released`, `consumed`.
+  - Reserved quantity interactions are maintained through service orchestration.
+- `WarehouseTransfer` / `WarehouseTransferLine`
+  - Inter-warehouse transfer workflow baseline (`draft -> shipped -> received`).
+  - Ship/receive updates are ledger-compatible service-driven movements.
+- `StockCount` / `StockCountLine`
+  - Physical stock count workflow baseline (`draft -> posted`).
+  - Count differences are posted through inventory service orchestration.
+- `CostLayer`
+  - FIFO valuation layer tracking tied to source ledger movements.
+  - Outgoing depletion consumes remaining layers in service-managed FIFO order.
+
+### service boundary
+- Stable service boundary is `backend/apps/inventory/services.py`.
+- Downstream interaction must happen through inventory service-layer calls and model references.
+- This service boundary must preserve:
+  - company scope filtering,
+  - module enablement checks,
+  - permission checks,
+  - audit compatibility,
+  - inventory consistency rules,
+  - ledger-first operational writes.
+
+### current stable behaviors
+- Stock movement recording writes ledger entries and updates stock balance through service orchestration.
+- Reservation create/release/consume updates reservation status and reserved quantity consistently.
+- Stock count posting writes signed adjust movements through inventory movement services.
+- Transfer ship/receive executes transfer-out/transfer-in movement orchestration through ledger writes.
+- FIFO layer creation/consumption follows current service implementation baseline.
+- Inventory module guard and permission compatibility follow current repaired baseline.
+- Append-only ledger, reservation consume correction, stock-count direction correction, and related audit-compatible service behavior are baseline dependencies (not optional guidance).
+
+### allowed downstream usage
+- Later steps may read inventory balances and ledger traces.
+- Later steps may reference lot/serial/reservation/transfer/count/cost-layer records.
+- Later steps may invoke STEP3 service-layer operations for inventory movement workflows.
+- Later steps may attach document workflows to STEP3 reference-document linkage patterns.
+- Later steps may expose STEP3 capabilities through per-app `api/` adapters without redefining inventory ownership.
+
+### forbidden downstream changes
+- Do not duplicate STEP3 inventory engine models in later steps.
+- Do not move STEP3 workflow logic into `backend/apps/material/**`.
+- Do not bypass ledger/service-layer pattern with direct balance mutation in controllers/views/APIs.
+- Do not redesign stock balance as a parallel source of truth independent from STEP3 service behavior.
+- Do not create reverse dependency from STEP3 to later operational steps.
+- Do not weaken company-scope, permission, module-guard, audit, or append-only inventory semantics.
+- Do not treat unfinished future inventory capabilities as already frozen.
+
+## 7. Inherited Rules for All Later Steps
 - Dependency direction is one-way: earlier frozen steps -> later steps only.
 - Company scope is mandatory for business records and request handling.
 - Service-layer pattern is required; downstream business logic belongs in services.
@@ -127,8 +244,9 @@ frozen
 - Audit compatibility is required for critical operations and transitions.
 - Frozen entities must be reused as stable references instead of re-modeled.
 - Workflow backflow into earlier frozen domains is prohibited.
+- Business app API surfaces are incrementally extensible and are not globally frozen by root API foundation alone.
 
-## 6. Downstream Implementation Rule
+## 8. Downstream Implementation Rule
 - STEP3+ must use completed steps as frozen dependencies.
 - Extend capabilities through new apps and new services in later steps.
 - Do not rewrite earlier-step ownership boundaries unless a compatibility fix is explicitly required and reported.
