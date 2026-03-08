@@ -10,6 +10,7 @@ class CompanyScopeMiddleware:
     """Resolve request company scope and validate membership."""
 
     header_name = "HTTP_X_COMPANY_ID"
+    exempt_path_prefixes = ("/health/", "/api/auth/")
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -49,6 +50,9 @@ class CompanyScopeMiddleware:
         return None
 
     def __call__(self, request):
+        if request.path.startswith(self.exempt_path_prefixes):
+            return self.get_response(request)
+
         company_id = self._resolve_company_id(request)
         if company_id is None:
             return JsonResponse({"error": "missing_company_scope"}, status=400)
