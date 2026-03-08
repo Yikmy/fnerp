@@ -495,6 +495,8 @@ class StockCountService(InventoryDomainService):
         )
         if count is None:
             raise BusinessRuleError("Stock count not found in company scope")
+        if count.status != StockCount.Status.DRAFT:
+            raise BusinessRuleError("Only draft stock counts can be posted")
 
         for line in count.lines.all():
             if line.diff_qty == 0:
@@ -506,7 +508,7 @@ class StockCountService(InventoryDomainService):
                 warehouse_id=count.warehouse_id,
                 material_id=line.material_id,
                 movement_type=movement_type,
-                qty=abs(line.diff_qty),
+                qty=line.diff_qty if line.diff_qty < 0 else abs(line.diff_qty),
                 uom_id=line.material.uom_id,
                 ref_doc_type="stock_count",
                 ref_doc_id=count.id,
