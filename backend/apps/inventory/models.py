@@ -7,6 +7,7 @@ from apps.material.models import BinLocation, Material, UoM, Warehouse
 from shared.models.base import BaseModel
 
 
+
 class Lot(BaseModel):
     material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="lots")
     lot_code = models.CharField(max_length=80)
@@ -108,6 +109,17 @@ class StockLedger(BaseModel):
             errors["qty"] = "Quantity cannot be zero."
         if errors:
             raise DjangoValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        if self.pk and StockLedger.objects.filter(pk=self.pk).exists():
+            raise DjangoValidationError({"id": "StockLedger is append-only and cannot be updated."})
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise DjangoValidationError({"id": "StockLedger is append-only and cannot be deleted."})
+
+    def soft_delete(self):
+        raise DjangoValidationError({"id": "StockLedger is append-only and cannot be soft deleted."})
 
 
 class StockBalance(BaseModel):

@@ -6,6 +6,8 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from apps.material.models import Material, UoM, Warehouse
+from shared.constants.modules import MODULE_CODES
+from shared.constants.permissions import PERMISSION_CODES
 from shared.exceptions import BusinessRuleError
 from shared.services.base import BaseService
 from shared.services.module_guard import ModuleGuardService
@@ -25,7 +27,7 @@ from .models import (
 
 
 class InventoryDomainService(BaseService):
-    MODULE_CODE = "inventory"
+    MODULE_CODE = MODULE_CODES.INVENTORY
 
     @staticmethod
     def _user_id(user):
@@ -61,7 +63,7 @@ class MovementResult:
 
 
 class StockLedgerService(InventoryDomainService):
-    PERM_WRITE = "inventory.stock_ledger.write"
+    PERM_WRITE = PERMISSION_CODES.INVENTORY_STOCK_LEDGER_WRITE
 
     @transaction.atomic
     def record_movement(
@@ -88,6 +90,11 @@ class StockLedgerService(InventoryDomainService):
         material = self._material(company_id=company_id, material_id=material_id)
         warehouse = self._warehouse(company_id=company_id, warehouse_id=warehouse_id)
         uom = self._uom(company_id=company_id, uom_id=uom_id)
+
+        if movement_type in {StockLedger.MovementType.IN, StockLedger.MovementType.OUT, StockLedger.MovementType.TRANSFER_IN, StockLedger.MovementType.TRANSFER_OUT} and qty <= 0:
+            raise BusinessRuleError("Movement quantity must be greater than zero")
+        if movement_type == StockLedger.MovementType.ADJUST and qty == 0:
+            raise BusinessRuleError("Adjust movement quantity cannot be zero")
 
         lot = None
         if lot_id:
@@ -123,6 +130,9 @@ class StockLedgerService(InventoryDomainService):
         signed_qty = qty
         if movement_type in {StockLedger.MovementType.OUT, StockLedger.MovementType.TRANSFER_OUT}:
             signed_qty = -qty
+        elif movement_type == StockLedger.MovementType.ADJUST:
+            # ADJUST uses signed quantity from caller: positive for gain, negative for shrinkage.
+            signed_qty = qty
 
         balance, _ = StockBalance.objects.select_for_update().get_or_create(
             company_id=company_id,
@@ -153,16 +163,26 @@ class StockLedgerService(InventoryDomainService):
         return MovementResult(ledger=ledger, balance=balance)
 
     def _apply_fifo_layers(self, *, company_id, ledger: StockLedger):
-        if ledger.movement_type in {StockLedger.MovementType.IN, StockLedger.MovementType.TRANSFER_IN}:
+        incoming_types = {StockLedger.MovementType.IN, StockLedger.MovementType.TRANSFER_IN}
+        outgoing_types = {StockLedger.MovementType.OUT, StockLedger.MovementType.TRANSFER_OUT}
+
+        if ledger.movement_type == StockLedger.MovementType.ADJUST:
+            if ledger.qty > 0:
+                incoming_types.add(StockLedger.MovementType.ADJUST)
+            else:
+                outgoing_types.add(StockLedger.MovementType.ADJUST)
+
+        if ledger.movement_type in incoming_types:
+            # Positive ADJUST creates a zero-cost layer for consistency with later FIFO depletion.
             unit_cost = Decimal("0")
-            if ledger.qty:
-                unit_cost = ledger.cost_amount / ledger.qty
+            if ledger.qty > 0:
+                unit_cost = ledger.cost_amount / ledger.qty if ledger.qty else Decimal("0")
             layer = CostLayer(
                 company_id=company_id,
                 material=ledger.material,
                 warehouse=ledger.warehouse,
-                in_qty=ledger.qty,
-                remaining_qty=ledger.qty,
+                in_qty=abs(ledger.qty),
+                remaining_qty=abs(ledger.qty),
                 unit_cost=unit_cost,
                 source_ledger=ledger,
                 created_by=ledger.created_by,
@@ -172,10 +192,10 @@ class StockLedgerService(InventoryDomainService):
             layer.save()
             return
 
-        if ledger.movement_type not in {StockLedger.MovementType.OUT, StockLedger.MovementType.TRANSFER_OUT}:
+        if ledger.movement_type not in outgoing_types:
             return
 
-        required_qty = ledger.qty
+        required_qty = abs(ledger.qty)
         layers = CostLayer.objects.select_for_update().active().for_company(company_id).filter(
             material=ledger.material,
             warehouse=ledger.warehouse,
@@ -195,7 +215,9 @@ class StockLedgerService(InventoryDomainService):
 
 
 class ReservationService(InventoryDomainService):
-    PERM_CREATE = "inventory.reservation.create"
+    PERM_CREATE = PERMISSION_CODES.INVENTORY_RESERVATION_CREATE
+    PERM_RELEASE = PERMISSION_CODES.INVENTORY_RESERVATION_RELEASE
+    PERM_CONSUME = PERMISSION_CODES.INVENTORY_RESERVATION_CONSUME
 
     @transaction.atomic
     def create_reservation(
@@ -257,6 +279,9 @@ class ReservationService(InventoryDomainService):
 
     @transaction.atomic
     def release_reservation(self, *, user, company_id, reservation_id, request=None) -> Reservation:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_RELEASE)
+
         reservation = (
             Reservation.objects.select_for_update()
             .active()
@@ -300,9 +325,59 @@ class ReservationService(InventoryDomainService):
         )
         return reservation
 
+    @transaction.atomic
+    def consume_reservation(self, *, user, company_id, reservation_id, request=None) -> Reservation:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CONSUME)
+
+        reservation = (
+            Reservation.objects.select_for_update()
+            .active()
+            .for_company(company_id)
+            .filter(id=reservation_id)
+            .first()
+        )
+        if reservation is None:
+            raise BusinessRuleError("Reservation not found in company scope")
+        if reservation.status != Reservation.Status.ACTIVE:
+            raise BusinessRuleError("Only active reservations can be consumed")
+
+        balance = (
+            StockBalance.objects.select_for_update()
+            .active()
+            .for_company(company_id)
+            .filter(warehouse=reservation.warehouse, material=reservation.material, lot__isnull=True, serial__isnull=True)
+            .first()
+        )
+        if balance is None:
+            raise BusinessRuleError("Stock balance not found for reservation")
+
+        balance.reserved_qty -= reservation.qty
+        balance.updated_by = self._user_id(user)
+        balance.full_clean()
+        balance.save()
+
+        reservation.status = Reservation.Status.CONSUMED
+        reservation.updated_by = self._user_id(user)
+        reservation.full_clean()
+        reservation.save(update_fields=["status", "updated_by", "updated_at"])
+
+        self.audit_crud(
+            user=user,
+            company_id=company_id,
+            operation="update",
+            resource_type="inventory.reservation",
+            resource_id=reservation.id,
+            request=request,
+            field_diffs=[{"field": "status", "old": Reservation.Status.ACTIVE, "new": Reservation.Status.CONSUMED}],
+        )
+        return reservation
+
 
 class WarehouseTransferService(InventoryDomainService):
-    PERM_CREATE = "inventory.transfer.create"
+    PERM_CREATE = PERMISSION_CODES.INVENTORY_TRANSFER_CREATE
+    PERM_SHIP = PERMISSION_CODES.INVENTORY_TRANSFER_SHIP
+    PERM_RECEIVE = PERMISSION_CODES.INVENTORY_TRANSFER_RECEIVE
 
     def __init__(self):
         super().__init__()
@@ -358,6 +433,9 @@ class WarehouseTransferService(InventoryDomainService):
 
     @transaction.atomic
     def ship_transfer(self, *, user, company_id, transfer_id, request=None) -> WarehouseTransfer:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_SHIP)
+
         transfer = (
             WarehouseTransfer.objects.select_for_update()
             .active()
@@ -391,10 +469,23 @@ class WarehouseTransferService(InventoryDomainService):
         transfer.updated_by = self._user_id(user)
         transfer.full_clean()
         transfer.save(update_fields=["status", "ship_date", "updated_by", "updated_at"])
+
+        self.audit_crud(
+            user=user,
+            company_id=company_id,
+            operation="update",
+            resource_type="inventory.transfer",
+            resource_id=transfer.id,
+            request=request,
+            field_diffs=[{"field": "status", "old": WarehouseTransfer.Status.DRAFT, "new": WarehouseTransfer.Status.SHIPPED}],
+        )
         return transfer
 
     @transaction.atomic
     def receive_transfer(self, *, user, company_id, transfer_id, request=None) -> WarehouseTransfer:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_RECEIVE)
+
         transfer = (
             WarehouseTransfer.objects.select_for_update()
             .active()
@@ -428,11 +519,22 @@ class WarehouseTransferService(InventoryDomainService):
         transfer.updated_by = self._user_id(user)
         transfer.full_clean()
         transfer.save(update_fields=["status", "receive_date", "updated_by", "updated_at"])
+
+        self.audit_crud(
+            user=user,
+            company_id=company_id,
+            operation="update",
+            resource_type="inventory.transfer",
+            resource_id=transfer.id,
+            request=request,
+            field_diffs=[{"field": "status", "old": WarehouseTransfer.Status.SHIPPED, "new": WarehouseTransfer.Status.RECEIVED}],
+        )
         return transfer
 
 
 class StockCountService(InventoryDomainService):
-    PERM_CREATE = "inventory.stock_count.create"
+    PERM_CREATE = PERMISSION_CODES.INVENTORY_STOCK_COUNT_CREATE
+    PERM_POST = PERMISSION_CODES.INVENTORY_STOCK_COUNT_POST
 
     def __init__(self):
         super().__init__()
@@ -486,6 +588,9 @@ class StockCountService(InventoryDomainService):
 
     @transaction.atomic
     def post_count(self, *, user, company_id, count_id, request=None) -> StockCount:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_POST)
+
         count = (
             StockCount.objects.select_for_update()
             .active()
@@ -499,14 +604,16 @@ class StockCountService(InventoryDomainService):
         for line in count.lines.all():
             if line.diff_qty == 0:
                 continue
-            movement_type = StockLedger.MovementType.IN if line.diff_qty > 0 else StockLedger.MovementType.ADJUST
+            movement_qty = line.diff_qty
             self.ledger_service.record_movement(
+                # ADJUST movement uses signed qty to preserve stock-count direction:
+                # positive diff adds stock; negative diff reduces stock.
                 user=user,
                 company_id=company_id,
                 warehouse_id=count.warehouse_id,
                 material_id=line.material_id,
-                movement_type=movement_type,
-                qty=abs(line.diff_qty),
+                movement_type=StockLedger.MovementType.ADJUST,
+                qty=movement_qty,
                 uom_id=line.material.uom_id,
                 ref_doc_type="stock_count",
                 ref_doc_id=count.id,
@@ -517,4 +624,14 @@ class StockCountService(InventoryDomainService):
         count.updated_by = self._user_id(user)
         count.full_clean()
         count.save(update_fields=["status", "updated_by", "updated_at"])
+
+        self.audit_crud(
+            user=user,
+            company_id=company_id,
+            operation="update",
+            resource_type="inventory.stock_count",
+            resource_id=count.id,
+            request=request,
+            field_diffs=[{"field": "status", "old": StockCount.Status.DRAFT, "new": StockCount.Status.POSTED}],
+        )
         return count
