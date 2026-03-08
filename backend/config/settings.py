@@ -20,6 +20,7 @@ INSTALLED_APPS = [
     "system_config",
     "apps.material",
     "apps.inventory",
+    "apps.purchase",
 ]
 
 MIDDLEWARE = [
