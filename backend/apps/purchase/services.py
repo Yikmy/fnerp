@@ -323,7 +323,12 @@ class GoodsReceiptService(PurchaseDomainService):
     @transaction.atomic
     def transition_goods_receipt(self, *, user, company_id, grn_id, to_state, notes="", request=None):
         self._ensure_module_enabled(company_id=company_id)
-        grn = GoodsReceipt.objects.active().for_company(company_id).filter(id=grn_id).first()
+
+        grn_queryset = GoodsReceipt.objects.active().for_company(company_id).filter(id=grn_id)
+        if to_state == DOC_STATUS.COMPLETED:
+            grn_queryset = grn_queryset.select_for_update()
+
+        grn = grn_queryset.first()
         if grn is None:
             raise BusinessRuleError("Goods receipt not found in company scope")
 
