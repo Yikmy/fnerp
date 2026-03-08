@@ -224,6 +224,7 @@ class IQCRecord(BaseModel):
 
 class InvoiceMatch(models.Model):
     id = models.BigAutoField(primary_key=True)
+    company_id = models.UUIDField(db_index=True)
     invoice_id = models.UUIDField()
     po = models.ForeignKey(PurchaseOrder, null=True, blank=True, on_delete=models.PROTECT, related_name="invoice_matches")
     grn = models.ForeignKey(GoodsReceipt, null=True, blank=True, on_delete=models.PROTECT, related_name="invoice_matches")
@@ -236,6 +237,10 @@ class InvoiceMatch(models.Model):
 
     def clean(self):
         errors = {}
+        if self.po_id and self.po.company_id != self.company_id:
+            errors["po"] = "PO company must match invoice match company."
+        if self.grn_id and self.grn.company_id != self.company_id:
+            errors["grn"] = "GRN company must match invoice match company."
         if self.po_id and self.grn_id and self.po.company_id != self.grn.company_id:
             errors["grn"] = "PO and GRN must be in the same company."
         if self.matched_amount is not None and self.matched_amount < 0:
