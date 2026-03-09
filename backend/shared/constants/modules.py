@@ -11,3 +11,4 @@ class MODULE_CODES(StrEnum):
     MATERIAL = "material"
     INVENTORY = "inventory"
     PURCHASE = "purchase"
+    SALES = "sales"
