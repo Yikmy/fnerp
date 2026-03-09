@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import models, transaction
 
 from apps.inventory.models import Reservation, StockLedger
 from apps.inventory.services import ReservationService, StockLedgerService
@@ -187,10 +187,13 @@ class SalesQuoteService(SalesDomainService):
         total_amount = Decimal("0")
         for line in lines or []:
             quote_line = SalesQuoteLine(
+                company_id=company_id,
                 quote=quote,
                 material=self._material(company_id=company_id, material_id=line["material_id"]),
                 qty=line["qty"],
                 price=line["price"],
+                created_by=self._user_id(user),
+                updated_by=self._user_id(user),
             )
             quote_line.full_clean()
             quote_line.save()
@@ -391,12 +394,28 @@ class ShipmentService(SalesDomainService):
             if so_line is None:
                 raise BusinessRuleError("Sales order line not found in sales order")
 
+            requested_qty = line["qty"]
+            already_shipped_qty = (
+                ShipmentLine.objects.active()
+                .for_company(company_id)
+                .filter(so_line=so_line, shipment__status__in=[DOC_STATUS.CONFIRMED, DOC_STATUS.COMPLETED])
+                .exclude(shipment=shipment)
+                .aggregate(total=models.Sum("qty"))
+                .get("total")
+                or Decimal("0")
+            )
+            remaining_qty = so_line.qty - already_shipped_qty
+            if requested_qty > remaining_qty:
+                raise BusinessRuleError("Shipment quantity cannot exceed remaining sales order quantity")
+            if requested_qty > so_line.reserved_qty:
+                raise BusinessRuleError("Shipment quantity cannot exceed reserved quantity")
+
             shipment_line = ShipmentLine(
                 company_id=company_id,
                 shipment=shipment,
                 so_line=so_line,
                 material=self._material(company_id=company_id, material_id=line["material_id"]),
-                qty=line["qty"],
+                qty=requested_qty,
                 lot_id=line.get("lot_id"),
                 serial_id=line.get("serial_id"),
                 created_by=self._user_id(user),
@@ -462,18 +481,42 @@ class ShipmentService(SalesDomainService):
                 .filter(ref_doc_type="sales.order.line", ref_doc_id=line.so_line_id, status=Reservation.Status.ACTIVE)
                 .first()
             )
-            if reservation:
+            if reservation is None:
+                raise BusinessRuleError("Active reservation is required before shipment completion")
+            if line.qty > reservation.qty:
+                raise BusinessRuleError("Shipment quantity cannot exceed reserved quantity")
+
+            so_line = line.so_line
+            remaining_reserved = reservation.qty - line.qty
+            if remaining_reserved == 0:
                 self.reservation_service.consume_reservation(
                     user=user,
                     company_id=company_id,
                     reservation_id=reservation.id,
                     request=request,
                 )
-                so_line = line.so_line
-                so_line.reserved_qty = Decimal("0")
-                so_line.updated_by = self._user_id(user)
-                so_line.full_clean()
-                so_line.save(update_fields=["reserved_qty", "updated_by", "updated_at"])
+            else:
+                self.reservation_service.release_reservation(
+                    user=user,
+                    company_id=company_id,
+                    reservation_id=reservation.id,
+                    request=request,
+                )
+                self.reservation_service.create_reservation(
+                    user=user,
+                    company_id=company_id,
+                    warehouse_id=so_line.warehouse_id,
+                    material_id=so_line.material_id,
+                    qty=remaining_reserved,
+                    ref_doc_type="sales.order.line",
+                    ref_doc_id=so_line.id,
+                    request=request,
+                )
+
+            so_line.reserved_qty = remaining_reserved
+            so_line.updated_by = self._user_id(user)
+            so_line.full_clean()
+            so_line.save(update_fields=["reserved_qty", "updated_by", "updated_at"])
 
 
 class RMAService(SalesDomainService):

@@ -87,8 +87,7 @@ class SalesQuote(BaseModel):
             raise DjangoValidationError({"customer": "Customer company must match quote company."})
 
 
-class SalesQuoteLine(models.Model):
-    id = models.BigAutoField(primary_key=True)
+class SalesQuoteLine(BaseModel):
     quote = models.ForeignKey(SalesQuote, on_delete=models.CASCADE, related_name="lines")
     material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="sales_quote_lines")
     qty = models.DecimalField(max_digits=20, decimal_places=6)
@@ -99,7 +98,9 @@ class SalesQuoteLine(models.Model):
 
     def clean(self):
         errors = {}
-        if self.quote_id and self.material_id and self.quote.company_id != self.material.company_id:
+        if self.quote_id and self.quote.company_id != self.company_id:
+            errors["quote"] = "Quote company must match line company."
+        if self.material_id and self.material.company_id != self.company_id:
             errors["material"] = "Material company must match quote company."
         if self.qty is not None and self.qty <= 0:
             errors["qty"] = "qty must be greater than zero."

@@ -474,7 +474,21 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="SalesQuoteLine",
             fields=[
-                ("id", models.BigAutoField(primary_key=True, serialize=False)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4,
+                        editable=False,
+                        primary_key=True,
+                        serialize=False,
+                    ),
+                ),
+                ("company_id", models.UUIDField(db_index=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("created_by", models.UUIDField(blank=True, null=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("updated_by", models.UUIDField(blank=True, null=True)),
+                ("is_deleted", models.BooleanField(default=False)),
                 ("qty", models.DecimalField(decimal_places=6, max_digits=20)),
                 ("price", models.DecimalField(decimal_places=6, max_digits=20)),
                 (
