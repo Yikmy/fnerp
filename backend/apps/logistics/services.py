@@ -1,9 +1,9 @@
 from django.db import transaction
 
-from audit.services import AuditService
 from apps.material.models import Material
 from apps.sales.models import Customer, SalesOrder, Shipment
-from doc.models import DocumentTransitionLog
+from doc.services import DocumentStateTransitionService
+from shared.constants.document import DOC_STATUS
 from shared.constants.modules import MODULE_CODES
 from shared.constants.permissions import PERMISSION_CODES
 from shared.exceptions import BusinessRuleError
@@ -55,25 +55,9 @@ class LogisticsDomainService(BaseService):
             raise BusinessRuleError("Material not found in company scope")
         return material
 
-    def _log_transition(self, *, user, company_id, document_type, document, from_state, to_state, request=None, notes=""):
-        DocumentTransitionLog.objects.create(
-            company_id=company_id,
-            document_type=document_type,
-            document_id=document.id,
-            from_state=from_state,
-            to_state=to_state,
-            operator_id=self._user_id(user),
-            notes=notes,
-        )
-        AuditService.log_state_transition(
-            actor_id=self._user_id(user),
-            company_id=company_id,
-            resource_type=document_type,
-            resource_id=document.id,
-            from_state=from_state,
-            to_state=to_state,
-            request=request,
-        )
+    def __init__(self):
+        super().__init__()
+        self.transition_service = DocumentStateTransitionService()
 
 
 class TransportOrderService(LogisticsDomainService):
@@ -81,16 +65,8 @@ class TransportOrderService(LogisticsDomainService):
     PERM_UPDATE = PERMISSION_CODES.LOGISTICS_TRANSPORT_ORDER_UPDATE
     PERM_CANCEL = PERMISSION_CODES.LOGISTICS_TRANSPORT_ORDER_CANCEL
 
-    TRANSITIONS = {
-        TransportOrder.Status.DRAFT: {TransportOrder.Status.ASSIGNED, TransportOrder.Status.CANCELLED},
-        TransportOrder.Status.ASSIGNED: {TransportOrder.Status.IN_TRANSIT, TransportOrder.Status.CANCELLED},
-        TransportOrder.Status.IN_TRANSIT: {TransportOrder.Status.DELIVERED, TransportOrder.Status.CANCELLED},
-        TransportOrder.Status.DELIVERED: set(),
-        TransportOrder.Status.CANCELLED: set(),
-    }
-
     @transaction.atomic
-    def create_transport_order(self, *, user, company_id, shipment_id, carrier, sales_order_id=None, vehicle_no="", driver_name="", driver_contact="", status=TransportOrder.Status.DRAFT, planned_departure=None, planned_arrival=None, request=None) -> TransportOrder:
+    def create_transport_order(self, *, user, company_id, shipment_id, carrier, sales_order_id=None, vehicle_no="", driver_name="", driver_contact="", status=DOC_STATUS.DRAFT, planned_departure=None, planned_arrival=None, request=None) -> TransportOrder:
         self._ensure_module_enabled(company_id=company_id)
         self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
 
@@ -126,7 +102,7 @@ class TransportOrderService(LogisticsDomainService):
         row = TransportOrder.objects.active().for_company(company_id).filter(id=transport_order_id).first()
         if row is None:
             raise BusinessRuleError("Transport order not found in company scope")
-        if row.status == TransportOrder.Status.CANCELLED:
+        if row.status == DOC_STATUS.CANCELLED:
             raise BusinessRuleError("Cancelled transport order cannot be updated")
 
         for field, value in {
@@ -149,33 +125,24 @@ class TransportOrderService(LogisticsDomainService):
     @transaction.atomic
     def transition_transport_order(self, *, user, company_id, transport_order_id, to_status, notes="", request=None) -> TransportOrder:
         self._ensure_module_enabled(company_id=company_id)
-        perm = self.PERM_CANCEL if to_status == TransportOrder.Status.CANCELLED else self.PERM_UPDATE
-        self.ensure_permission(user=user, company_id=company_id, permission_code=perm)
+        # Update permission guards logistics write capability; transition permission is enforced by shared state machine.
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_UPDATE)
 
         row = TransportOrder.objects.active().for_company(company_id).filter(id=transport_order_id).first()
         if row is None:
             raise BusinessRuleError("Transport order not found in company scope")
 
-        allowed = self.TRANSITIONS.get(row.status, set())
-        if to_status not in allowed:
-            raise BusinessRuleError(f"Invalid transport order transition: {row.status} -> {to_status}")
-
-        from_status = row.status
-        row.status = to_status
-        row.updated_by = self._user_id(user)
-        row.full_clean()
-        row.save(update_fields=["status", "updated_by", "updated_at"])
-
-        self._log_transition(
+        row = self.transition_service.transition(
             user=user,
             company_id=company_id,
-            document_type="logistics.transport_order",
             document=row,
-            from_state=from_status,
+            document_type="logistics.transport_order",
             to_state=to_status,
             notes=notes,
             request=request,
         )
+        row.updated_by = self._user_id(user)
+        row.save(update_fields=["updated_by", "updated_at"])
         return row
 
 
@@ -242,16 +209,8 @@ class ContainerRecoveryService(LogisticsDomainService):
     PERM_UPDATE = PERMISSION_CODES.LOGISTICS_CONTAINER_RECOVERY_UPDATE
     PERM_CANCEL = PERMISSION_CODES.LOGISTICS_CONTAINER_RECOVERY_CANCEL
 
-    TRANSITIONS = {
-        ContainerRecoveryPlan.Status.DRAFT: {ContainerRecoveryPlan.Status.PLANNED, ContainerRecoveryPlan.Status.CANCELLED},
-        ContainerRecoveryPlan.Status.PLANNED: {ContainerRecoveryPlan.Status.IN_PROGRESS, ContainerRecoveryPlan.Status.CANCELLED},
-        ContainerRecoveryPlan.Status.IN_PROGRESS: {ContainerRecoveryPlan.Status.COMPLETED, ContainerRecoveryPlan.Status.CANCELLED},
-        ContainerRecoveryPlan.Status.COMPLETED: set(),
-        ContainerRecoveryPlan.Status.CANCELLED: set(),
-    }
-
     @transaction.atomic
-    def create_plan(self, *, user, company_id, customer_id, planned_date=None, status=ContainerRecoveryPlan.Status.DRAFT, lines=None, request=None) -> ContainerRecoveryPlan:
+    def create_plan(self, *, user, company_id, customer_id, planned_date=None, status=DOC_STATUS.DRAFT, lines=None, request=None) -> ContainerRecoveryPlan:
         self._ensure_module_enabled(company_id=company_id)
         self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
 
@@ -289,7 +248,7 @@ class ContainerRecoveryService(LogisticsDomainService):
         plan = ContainerRecoveryPlan.objects.active().for_company(company_id).filter(id=plan_id).first()
         if plan is None:
             raise BusinessRuleError("Container recovery plan not found in company scope")
-        if plan.status in {ContainerRecoveryPlan.Status.COMPLETED, ContainerRecoveryPlan.Status.CANCELLED}:
+        if plan.status in {DOC_STATUS.COMPLETED, DOC_STATUS.CANCELLED}:
             raise BusinessRuleError("Completed or cancelled recovery plan cannot be updated")
 
         if planned_date is not None:
@@ -303,33 +262,23 @@ class ContainerRecoveryService(LogisticsDomainService):
     @transaction.atomic
     def transition_plan(self, *, user, company_id, plan_id, to_status, notes="", request=None) -> ContainerRecoveryPlan:
         self._ensure_module_enabled(company_id=company_id)
-        perm = self.PERM_CANCEL if to_status == ContainerRecoveryPlan.Status.CANCELLED else self.PERM_UPDATE
-        self.ensure_permission(user=user, company_id=company_id, permission_code=perm)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_UPDATE)
 
         plan = ContainerRecoveryPlan.objects.active().for_company(company_id).filter(id=plan_id).first()
         if plan is None:
             raise BusinessRuleError("Container recovery plan not found in company scope")
 
-        allowed = self.TRANSITIONS.get(plan.status, set())
-        if to_status not in allowed:
-            raise BusinessRuleError(f"Invalid recovery plan transition: {plan.status} -> {to_status}")
-
-        from_status = plan.status
-        plan.status = to_status
-        plan.updated_by = self._user_id(user)
-        plan.full_clean()
-        plan.save(update_fields=["status", "updated_by", "updated_at"])
-
-        self._log_transition(
+        plan = self.transition_service.transition(
             user=user,
             company_id=company_id,
-            document_type="logistics.container_recovery_plan",
             document=plan,
-            from_state=from_status,
+            document_type="logistics.container_recovery_plan",
             to_state=to_status,
             notes=notes,
             request=request,
         )
+        plan.updated_by = self._user_id(user)
+        plan.save(update_fields=["updated_by", "updated_at"])
         return plan
 
 

@@ -6,13 +6,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.logistics.models import (
-    ContainerRecoveryPlan,
-    FreightCharge,
-    InsurancePolicy,
-    ShipmentTrackingEvent,
-    TransportOrder,
-)
+from apps.logistics.models import FreightCharge, InsurancePolicy, ShipmentTrackingEvent
 from apps.logistics.services import (
     ContainerRecoveryService,
     FreightChargeService,
@@ -23,10 +17,11 @@ from apps.logistics.services import (
 from apps.material.models import Material, MaterialCategory, UoM, Warehouse
 from apps.sales.models import Customer, SalesOrder, Shipment
 from company.models import Company, CompanyMembership, CompanyModule
-from doc.models import DocumentTransitionLog
+from doc.models import DocumentStateMachineDef, DocumentTransitionLog
 from rbac.models import Permission, Role, RolePermission
+from shared.constants.document import DOC_STATUS
 from shared.constants.permissions import PERMISSION_CODES
-from shared.exceptions import BusinessRuleError, PermissionDeniedError
+from shared.exceptions import BusinessRuleError, PermissionDeniedError, ValidationError
 
 
 class LogisticsStep6Tests(TestCase):
@@ -58,6 +53,16 @@ class LogisticsStep6Tests(TestCase):
             PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_CREATE,
             PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_UPDATE,
             PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_CANCEL,
+            "logistics.transport_order.submit_state",
+            "logistics.transport_order.confirm_state",
+            "logistics.transport_order.complete_state",
+            "logistics.transport_order.cancel_state",
+            "logistics.transport_order.cancel_completed_state",
+            "logistics.container_recovery_plan.submit_state",
+            "logistics.container_recovery_plan.confirm_state",
+            "logistics.container_recovery_plan.complete_state",
+            "logistics.container_recovery_plan.cancel_state",
+            "logistics.container_recovery_plan.cancel_completed_state",
         ]
         for code in perms:
             perm = Permission.objects.create(code=code, name=code)
@@ -65,6 +70,8 @@ class LogisticsStep6Tests(TestCase):
 
         CompanyMembership.objects.create(user=self.user, company=self.company, role=role, is_active=True)
         CompanyMembership.objects.create(user=self.no_perm_user, company=self.company, is_active=True)
+
+        self._seed_document_transitions()
 
         self.uom = UoM.objects.create(company_id=self.company.id, name="EA", symbol="ea", ratio_to_base=Decimal("1"))
         self.category = MaterialCategory.objects.create(company_id=self.company.id, name="Containers")
@@ -108,7 +115,38 @@ class LogisticsStep6Tests(TestCase):
             ship_date="2026-03-09",
         )
 
-    def test_transport_order_create_update_transition_cancel_and_sales_link(self):
+    def _seed_document_transitions(self):
+        transition_specs = {
+            "logistics.transport_order": [
+                (DOC_STATUS.DRAFT, DOC_STATUS.SUBMITTED, "logistics.transport_order.submit_state"),
+                (DOC_STATUS.SUBMITTED, DOC_STATUS.CONFIRMED, "logistics.transport_order.confirm_state"),
+                (DOC_STATUS.CONFIRMED, DOC_STATUS.COMPLETED, "logistics.transport_order.complete_state"),
+                (DOC_STATUS.DRAFT, DOC_STATUS.CANCELLED, "logistics.transport_order.cancel_state"),
+                (DOC_STATUS.SUBMITTED, DOC_STATUS.CANCELLED, "logistics.transport_order.cancel_state"),
+                (DOC_STATUS.CONFIRMED, DOC_STATUS.CANCELLED, "logistics.transport_order.cancel_state"),
+                (DOC_STATUS.COMPLETED, DOC_STATUS.CANCELLED, "logistics.transport_order.cancel_completed_state"),
+            ],
+            "logistics.container_recovery_plan": [
+                (DOC_STATUS.DRAFT, DOC_STATUS.SUBMITTED, "logistics.container_recovery_plan.submit_state"),
+                (DOC_STATUS.SUBMITTED, DOC_STATUS.CONFIRMED, "logistics.container_recovery_plan.confirm_state"),
+                (DOC_STATUS.CONFIRMED, DOC_STATUS.COMPLETED, "logistics.container_recovery_plan.complete_state"),
+                (DOC_STATUS.DRAFT, DOC_STATUS.CANCELLED, "logistics.container_recovery_plan.cancel_state"),
+                (DOC_STATUS.SUBMITTED, DOC_STATUS.CANCELLED, "logistics.container_recovery_plan.cancel_state"),
+                (DOC_STATUS.CONFIRMED, DOC_STATUS.CANCELLED, "logistics.container_recovery_plan.cancel_state"),
+                (DOC_STATUS.COMPLETED, DOC_STATUS.CANCELLED, "logistics.container_recovery_plan.cancel_completed_state"),
+            ],
+        }
+        for document_type, transitions in transition_specs.items():
+            for from_state, to_state, permission_code in transitions:
+                DocumentStateMachineDef.objects.create(
+                    document_type=document_type,
+                    from_state=from_state,
+                    to_state=to_state,
+                    permission_code=permission_code,
+                    is_active=True,
+                )
+
+    def test_transport_order_create_update_transition_and_sales_link(self):
         svc = TransportOrderService()
         row = svc.create_transport_order(
             user=self.user,
@@ -122,10 +160,10 @@ class LogisticsStep6Tests(TestCase):
         row = svc.update_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, vehicle_no="AB-123")
         self.assertEqual(row.vehicle_no, "AB-123")
 
-        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.ASSIGNED)
-        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.IN_TRANSIT)
-        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.DELIVERED)
-        self.assertEqual(row.status, TransportOrder.Status.DELIVERED)
+        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.SUBMITTED)
+        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.CONFIRMED)
+        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.COMPLETED)
+        self.assertEqual(row.status, DOC_STATUS.COMPLETED)
 
         self.assertTrue(
             DocumentTransitionLog.objects.filter(
@@ -148,22 +186,22 @@ class LogisticsStep6Tests(TestCase):
             )
 
         row = svc.create_transport_order(user=self.user, company_id=self.company.id, shipment_id=self.shipment.id, carrier="Carrier A")
-        with self.assertRaises(BusinessRuleError):
+        with self.assertRaises(ValidationError):
             svc.transition_transport_order(
                 user=self.user,
                 company_id=self.company.id,
                 transport_order_id=row.id,
-                to_status=TransportOrder.Status.DELIVERED,
+                to_status=DOC_STATUS.COMPLETED,
             )
 
-    def test_permission_denied_for_update_and_cancel(self):
+    def test_permission_denied_for_update_and_transition(self):
         svc = TransportOrderService()
         row = svc.create_transport_order(user=self.user, company_id=self.company.id, shipment_id=self.shipment.id, carrier="Carrier A")
 
         with self.assertRaises(PermissionDeniedError):
             svc.update_transport_order(user=self.no_perm_user, company_id=self.company.id, transport_order_id=row.id, vehicle_no="X")
         with self.assertRaises(PermissionDeniedError):
-            svc.transition_transport_order(user=self.no_perm_user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.CANCELLED)
+            svc.transition_transport_order(user=self.no_perm_user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.CANCELLED)
 
     def test_company_scope_enforced(self):
         with self.assertRaises(BusinessRuleError):
@@ -191,7 +229,7 @@ class LogisticsStep6Tests(TestCase):
                 carrier="Carrier A",
             )
 
-    def test_recovery_state_flow_and_validation(self):
+    def test_recovery_state_flow(self):
         svc = ContainerRecoveryService()
         plan = svc.create_plan(
             user=self.user,
@@ -199,10 +237,10 @@ class LogisticsStep6Tests(TestCase):
             customer_id=self.customer.id,
             lines=[{"container_material_id": self.material.id, "qty": Decimal("5")}],
         )
-        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=ContainerRecoveryPlan.Status.PLANNED)
-        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=ContainerRecoveryPlan.Status.IN_PROGRESS)
-        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=ContainerRecoveryPlan.Status.COMPLETED)
-        self.assertEqual(plan.status, ContainerRecoveryPlan.Status.COMPLETED)
+        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=DOC_STATUS.SUBMITTED)
+        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=DOC_STATUS.CONFIRMED)
+        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=DOC_STATUS.COMPLETED)
+        self.assertEqual(plan.status, DOC_STATUS.COMPLETED)
 
         self.assertTrue(
             DocumentTransitionLog.objects.filter(

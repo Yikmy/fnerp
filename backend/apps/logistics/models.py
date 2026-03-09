@@ -5,24 +5,18 @@ from django.db import models
 
 from apps.material.models import Material
 from apps.sales.models import Customer, SalesOrder, Shipment
+from shared.constants.document import DOC_STATUS
 from shared.models.base import BaseModel
 
 
 class TransportOrder(BaseModel):
-    class Status(models.TextChoices):
-        DRAFT = "draft", "Draft"
-        ASSIGNED = "assigned", "Assigned"
-        IN_TRANSIT = "in_transit", "In Transit"
-        DELIVERED = "delivered", "Delivered"
-        CANCELLED = "cancelled", "Cancelled"
-
     shipment = models.ForeignKey(Shipment, on_delete=models.PROTECT, related_name="transport_orders")
     sales_order = models.ForeignKey(SalesOrder, null=True, blank=True, on_delete=models.PROTECT, related_name="transport_orders")
     carrier = models.CharField(max_length=120)
     vehicle_no = models.CharField(max_length=64, blank=True)
     driver_name = models.CharField(max_length=120, blank=True)
     driver_contact = models.CharField(max_length=120, blank=True)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    status = models.CharField(max_length=20, choices=[(s, s) for s in DOC_STATUS], default=DOC_STATUS.DRAFT)
     planned_departure = models.DateTimeField(null=True, blank=True)
     planned_arrival = models.DateTimeField(null=True, blank=True)
 
@@ -59,16 +53,9 @@ class ShipmentTrackingEvent(BaseModel):
 
 
 class ContainerRecoveryPlan(BaseModel):
-    class Status(models.TextChoices):
-        DRAFT = "draft", "Draft"
-        PLANNED = "planned", "Planned"
-        IN_PROGRESS = "in_progress", "In Progress"
-        COMPLETED = "completed", "Completed"
-        CANCELLED = "cancelled", "Cancelled"
-
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name="container_recovery_plans")
     planned_date = models.DateField(null=True, blank=True)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    status = models.CharField(max_length=20, choices=[(s, s) for s in DOC_STATUS], default=DOC_STATUS.DRAFT)
 
     class Meta:
         db_table = "log_container_recovery_plan"
@@ -77,7 +64,7 @@ class ContainerRecoveryPlan(BaseModel):
         errors = {}
         if self.customer_id and self.customer.company_id != self.company_id:
             errors["customer"] = "Customer company must match recovery plan company."
-        if self.pk and self.status == self.Status.COMPLETED and not self.lines.exists():
+        if self.pk and self.status == DOC_STATUS.COMPLETED and not self.lines.exists():
             errors["status"] = "Cannot complete container recovery plan without lines."
         if errors:
             raise DjangoValidationError(errors)
