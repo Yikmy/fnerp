@@ -37,3 +37,8 @@ class PERMISSION_CODES(StrEnum):
     SALES_SHIPMENT_CREATE = "sales.shipment.create"
     SALES_RMA_CREATE = "sales.rma.create"
 
+    LOGISTICS_TRANSPORT_ORDER_CREATE = "logistics.transport_order.create"
+    LOGISTICS_SHIPMENT_TRACKING_CREATE = "logistics.shipment_tracking.create"
+    LOGISTICS_CONTAINER_RECOVERY_CREATE = "logistics.container_recovery.create"
+    LOGISTICS_FREIGHT_CHARGE_CREATE = "logistics.freight_charge.create"
+    LOGISTICS_INSURANCE_POLICY_CREATE = "logistics.insurance_policy.create"
