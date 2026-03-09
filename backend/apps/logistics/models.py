@@ -4,7 +4,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import models
 
 from apps.material.models import Material
-from apps.sales.models import Customer, Shipment
+from apps.sales.models import Customer, SalesOrder, Shipment
 from shared.models.base import BaseModel
 
 
@@ -17,6 +17,7 @@ class TransportOrder(BaseModel):
         CANCELLED = "cancelled", "Cancelled"
 
     shipment = models.ForeignKey(Shipment, on_delete=models.PROTECT, related_name="transport_orders")
+    sales_order = models.ForeignKey(SalesOrder, null=True, blank=True, on_delete=models.PROTECT, related_name="transport_orders")
     carrier = models.CharField(max_length=120)
     vehicle_no = models.CharField(max_length=64, blank=True)
     driver_name = models.CharField(max_length=120, blank=True)
@@ -32,6 +33,10 @@ class TransportOrder(BaseModel):
         errors = {}
         if self.shipment_id and self.shipment.company_id != self.company_id:
             errors["shipment"] = "Shipment company must match transport order company."
+        if self.sales_order_id and self.sales_order.company_id != self.company_id:
+            errors["sales_order"] = "Sales order company must match transport order company."
+        if self.shipment_id and self.sales_order_id and self.shipment.so_id != self.sales_order_id:
+            errors["sales_order"] = "Sales order must match shipment sales order."
         if self.planned_departure and self.planned_arrival and self.planned_arrival < self.planned_departure:
             errors["planned_arrival"] = "planned_arrival cannot be earlier than planned_departure."
         if errors:
@@ -69,8 +74,13 @@ class ContainerRecoveryPlan(BaseModel):
         db_table = "log_container_recovery_plan"
 
     def clean(self):
+        errors = {}
         if self.customer_id and self.customer.company_id != self.company_id:
-            raise DjangoValidationError({"customer": "Customer company must match recovery plan company."})
+            errors["customer"] = "Customer company must match recovery plan company."
+        if self.pk and self.status == self.Status.COMPLETED and not self.lines.exists():
+            errors["status"] = "Cannot complete container recovery plan without lines."
+        if errors:
+            raise DjangoValidationError(errors)
 
 
 class ContainerRecoveryLine(BaseModel):
@@ -110,8 +120,8 @@ class FreightCharge(BaseModel):
         errors = {}
         if self.shipment_id and self.shipment.company_id != self.company_id:
             errors["shipment"] = "Shipment company must match freight charge company."
-        if self.amount is not None and self.amount < 0:
-            errors["amount"] = "amount cannot be negative."
+        if self.amount is not None and self.amount <= 0:
+            errors["amount"] = "amount must be greater than zero."
         if errors:
             raise DjangoValidationError(errors)
 
@@ -131,9 +141,9 @@ class InsurancePolicy(BaseModel):
         errors = {}
         if self.shipment_id and self.shipment.company_id != self.company_id:
             errors["shipment"] = "Shipment company must match insurance policy company."
-        if self.insured_amount is not None and self.insured_amount < 0:
-            errors["insured_amount"] = "insured_amount cannot be negative."
-        if self.premium is not None and self.premium < 0:
-            errors["premium"] = "premium cannot be negative."
+        if self.insured_amount is not None and self.insured_amount <= 0:
+            errors["insured_amount"] = "insured_amount must be greater than zero."
+        if self.premium is not None and self.premium <= 0:
+            errors["premium"] = "premium must be greater than zero."
         if errors:
             raise DjangoValidationError(errors)

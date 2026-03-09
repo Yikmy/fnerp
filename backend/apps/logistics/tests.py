@@ -1,10 +1,18 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.logistics.models import FreightCharge, InsurancePolicy, ShipmentTrackingEvent, TransportOrder
+from apps.logistics.models import (
+    ContainerRecoveryPlan,
+    FreightCharge,
+    InsurancePolicy,
+    ShipmentTrackingEvent,
+    TransportOrder,
+)
 from apps.logistics.services import (
     ContainerRecoveryService,
     FreightChargeService,
@@ -15,32 +23,48 @@ from apps.logistics.services import (
 from apps.material.models import Material, MaterialCategory, UoM, Warehouse
 from apps.sales.models import Customer, SalesOrder, Shipment
 from company.models import Company, CompanyMembership, CompanyModule
+from doc.models import DocumentTransitionLog
 from rbac.models import Permission, Role, RolePermission
 from shared.constants.permissions import PERMISSION_CODES
+from shared.exceptions import BusinessRuleError, PermissionDeniedError
 
 
 class LogisticsStep6Tests(TestCase):
     def setUp(self):
         user_model = get_user_model()
         self.user = user_model.objects.create_user(username="log_user", password="pwd")
+        self.no_perm_user = user_model.objects.create_user(username="log_user_no_perm", password="pwd")
 
         self.company = Company.objects.create(name="Logistics Co")
+        self.other_company = Company.objects.create(name="Other Co")
         for module in ["material", "sales", "logistics"]:
             CompanyModule.objects.create(company=self.company, module_code=module, is_enabled=True)
+            CompanyModule.objects.create(company=self.other_company, module_code=module, is_enabled=True)
 
         role = Role.objects.create(code="log-role", name="Log Role")
         perms = [
             PERMISSION_CODES.LOGISTICS_TRANSPORT_ORDER_CREATE,
+            PERMISSION_CODES.LOGISTICS_TRANSPORT_ORDER_UPDATE,
+            PERMISSION_CODES.LOGISTICS_TRANSPORT_ORDER_CANCEL,
             PERMISSION_CODES.LOGISTICS_SHIPMENT_TRACKING_CREATE,
+            PERMISSION_CODES.LOGISTICS_SHIPMENT_TRACKING_UPDATE,
+            PERMISSION_CODES.LOGISTICS_SHIPMENT_TRACKING_CANCEL,
             PERMISSION_CODES.LOGISTICS_CONTAINER_RECOVERY_CREATE,
+            PERMISSION_CODES.LOGISTICS_CONTAINER_RECOVERY_UPDATE,
+            PERMISSION_CODES.LOGISTICS_CONTAINER_RECOVERY_CANCEL,
             PERMISSION_CODES.LOGISTICS_FREIGHT_CHARGE_CREATE,
+            PERMISSION_CODES.LOGISTICS_FREIGHT_CHARGE_UPDATE,
+            PERMISSION_CODES.LOGISTICS_FREIGHT_CHARGE_CANCEL,
             PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_CREATE,
+            PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_UPDATE,
+            PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_CANCEL,
         ]
         for code in perms:
             perm = Permission.objects.create(code=code, name=code)
             RolePermission.objects.create(role=role, permission=perm)
 
         CompanyMembership.objects.create(user=self.user, company=self.company, role=role, is_active=True)
+        CompanyMembership.objects.create(user=self.no_perm_user, company=self.company, is_active=True)
 
         self.uom = UoM.objects.create(company_id=self.company.id, name="EA", symbol="ea", ratio_to_base=Decimal("1"))
         self.category = MaterialCategory.objects.create(company_id=self.company.id, name="Containers")
@@ -63,34 +87,189 @@ class LogisticsStep6Tests(TestCase):
             ship_date="2026-03-09",
         )
 
-    def test_create_transport_tracking_charge_policy_and_recovery(self):
-        to = TransportOrderService().create_transport_order(
+        other_uom = UoM.objects.create(company_id=self.other_company.id, name="EA2", symbol="ea2", ratio_to_base=Decimal("1"))
+        other_category = MaterialCategory.objects.create(company_id=self.other_company.id, name="Other")
+        self.other_material = Material.objects.create(
+            company_id=self.other_company.id,
+            code="BOX-O",
+            name="Other Box",
+            category=other_category,
+            uom=other_uom,
+        )
+        other_wh = Warehouse.objects.create(company_id=self.other_company.id, code="WH2", name="WH2")
+        self.other_customer = Customer.objects.create(company_id=self.other_company.id, code="C2", name="Customer 2")
+        self.other_order = SalesOrder.objects.create(company_id=self.other_company.id, doc_no="SO2", customer=self.other_customer)
+        self.other_shipment = Shipment.objects.create(
+            company_id=self.other_company.id,
+            doc_no="SHP2",
+            so=self.other_order,
+            customer=self.other_customer,
+            warehouse=other_wh,
+            ship_date="2026-03-09",
+        )
+
+    def test_transport_order_create_update_transition_cancel_and_sales_link(self):
+        svc = TransportOrderService()
+        row = svc.create_transport_order(
             user=self.user,
             company_id=self.company.id,
             shipment_id=self.shipment.id,
+            sales_order_id=self.order.id,
             carrier="Carrier A",
-            vehicle_no="AB-123",
-            driver_name="Driver",
-            driver_contact="123",
         )
-        event = ShipmentTrackingService().create_tracking_event(
+        self.assertEqual(row.sales_order_id, self.order.id)
+
+        row = svc.update_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, vehicle_no="AB-123")
+        self.assertEqual(row.vehicle_no, "AB-123")
+
+        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.ASSIGNED)
+        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.IN_TRANSIT)
+        row = svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.DELIVERED)
+        self.assertEqual(row.status, TransportOrder.Status.DELIVERED)
+
+        self.assertTrue(
+            DocumentTransitionLog.objects.filter(
+                company_id=self.company.id,
+                document_type="logistics.transport_order",
+                document_id=row.id,
+            ).exists()
+        )
+
+    def test_invalid_transition_and_invalid_dates_rejected(self):
+        svc = TransportOrderService()
+        with self.assertRaises(DjangoValidationError):
+            svc.create_transport_order(
+                user=self.user,
+                company_id=self.company.id,
+                shipment_id=self.shipment.id,
+                carrier="Carrier A",
+                planned_departure=timezone.now(),
+                planned_arrival=timezone.now() - timedelta(hours=1),
+            )
+
+        row = svc.create_transport_order(user=self.user, company_id=self.company.id, shipment_id=self.shipment.id, carrier="Carrier A")
+        with self.assertRaises(BusinessRuleError):
+            svc.transition_transport_order(
+                user=self.user,
+                company_id=self.company.id,
+                transport_order_id=row.id,
+                to_status=TransportOrder.Status.DELIVERED,
+            )
+
+    def test_permission_denied_for_update_and_cancel(self):
+        svc = TransportOrderService()
+        row = svc.create_transport_order(user=self.user, company_id=self.company.id, shipment_id=self.shipment.id, carrier="Carrier A")
+
+        with self.assertRaises(PermissionDeniedError):
+            svc.update_transport_order(user=self.no_perm_user, company_id=self.company.id, transport_order_id=row.id, vehicle_no="X")
+        with self.assertRaises(PermissionDeniedError):
+            svc.transition_transport_order(user=self.no_perm_user, company_id=self.company.id, transport_order_id=row.id, to_status=TransportOrder.Status.CANCELLED)
+
+    def test_company_scope_enforced(self):
+        with self.assertRaises(BusinessRuleError):
+            TransportOrderService().create_transport_order(
+                user=self.user,
+                company_id=self.company.id,
+                shipment_id=self.other_shipment.id,
+                carrier="X",
+            )
+        with self.assertRaises(BusinessRuleError):
+            ContainerRecoveryService().create_plan(
+                user=self.user,
+                company_id=self.company.id,
+                customer_id=self.customer.id,
+                lines=[{"container_material_id": self.other_material.id, "qty": Decimal("1")}],
+            )
+
+    def test_module_disabled_rejected(self):
+        CompanyModule.objects.filter(company=self.company, module_code="logistics").update(is_enabled=False)
+        with self.assertRaises(BusinessRuleError):
+            TransportOrderService().create_transport_order(
+                user=self.user,
+                company_id=self.company.id,
+                shipment_id=self.shipment.id,
+                carrier="Carrier A",
+            )
+
+    def test_recovery_state_flow_and_validation(self):
+        svc = ContainerRecoveryService()
+        plan = svc.create_plan(
+            user=self.user,
+            company_id=self.company.id,
+            customer_id=self.customer.id,
+            lines=[{"container_material_id": self.material.id, "qty": Decimal("5")}],
+        )
+        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=ContainerRecoveryPlan.Status.PLANNED)
+        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=ContainerRecoveryPlan.Status.IN_PROGRESS)
+        plan = svc.transition_plan(user=self.user, company_id=self.company.id, plan_id=plan.id, to_status=ContainerRecoveryPlan.Status.COMPLETED)
+        self.assertEqual(plan.status, ContainerRecoveryPlan.Status.COMPLETED)
+
+        self.assertTrue(
+            DocumentTransitionLog.objects.filter(
+                company_id=self.company.id,
+                document_type="logistics.container_recovery_plan",
+                document_id=plan.id,
+            ).exists()
+        )
+
+    def test_financial_and_qty_validations(self):
+        with self.assertRaises(DjangoValidationError):
+            FreightChargeService().create_freight_charge(
+                user=self.user,
+                company_id=self.company.id,
+                shipment_id=self.shipment.id,
+                calc_method=FreightCharge.CalcMethod.MANUAL,
+                amount=Decimal("0"),
+                currency="USD",
+            )
+
+        with self.assertRaises(DjangoValidationError):
+            InsurancePolicyService().create_policy(
+                user=self.user,
+                company_id=self.company.id,
+                shipment_id=self.shipment.id,
+                provider="Insure",
+                policy_no="P-0",
+                insured_amount=Decimal("0"),
+                premium=Decimal("10"),
+            )
+
+        with self.assertRaises(DjangoValidationError):
+            ContainerRecoveryService().create_plan(
+                user=self.user,
+                company_id=self.company.id,
+                customer_id=self.customer.id,
+                lines=[{"container_material_id": self.material.id, "qty": Decimal("0")}],
+            )
+
+    def test_tracking_freight_insurance_update_cancel(self):
+        tracking_svc = ShipmentTrackingService()
+        event = tracking_svc.create_tracking_event(
             user=self.user,
             company_id=self.company.id,
             shipment_id=self.shipment.id,
             status="picked_up",
-            location="Dock 1",
-            note="Loaded",
             event_time=timezone.now(),
         )
-        charge = FreightChargeService().create_freight_charge(
+        tracking_svc.update_tracking_event(user=self.user, company_id=self.company.id, event_id=event.id, note="updated")
+        tracking_svc.cancel_tracking_event(user=self.user, company_id=self.company.id, event_id=event.id)
+        self.assertFalse(ShipmentTrackingEvent.objects.active().for_company(self.company.id).filter(id=event.id).exists())
+
+        freight_svc = FreightChargeService()
+        freight = freight_svc.create_freight_charge(
             user=self.user,
             company_id=self.company.id,
             shipment_id=self.shipment.id,
-            calc_method="manual",
-            amount=Decimal("100.50"),
+            calc_method=FreightCharge.CalcMethod.MANUAL,
+            amount=Decimal("100"),
             currency="USD",
         )
-        policy = InsurancePolicyService().create_policy(
+        freight_svc.update_freight_charge(user=self.user, company_id=self.company.id, freight_charge_id=freight.id, amount=Decimal("120"))
+        freight_svc.cancel_freight_charge(user=self.user, company_id=self.company.id, freight_charge_id=freight.id)
+        self.assertFalse(FreightCharge.objects.active().for_company(self.company.id).filter(id=freight.id).exists())
+
+        ins_svc = InsurancePolicyService()
+        policy = ins_svc.create_policy(
             user=self.user,
             company_id=self.company.id,
             shipment_id=self.shipment.id,
@@ -99,15 +278,6 @@ class LogisticsStep6Tests(TestCase):
             insured_amount=Decimal("1000"),
             premium=Decimal("10"),
         )
-        plan = ContainerRecoveryService().create_plan(
-            user=self.user,
-            company_id=self.company.id,
-            customer_id=self.customer.id,
-            lines=[{"container_material_id": self.material.id, "qty": Decimal("5")}],
-        )
-
-        self.assertIsInstance(to, TransportOrder)
-        self.assertIsInstance(event, ShipmentTrackingEvent)
-        self.assertIsInstance(charge, FreightCharge)
-        self.assertIsInstance(policy, InsurancePolicy)
-        self.assertEqual(plan.lines.count(), 1)
+        ins_svc.update_policy(user=self.user, company_id=self.company.id, policy_id=policy.id, premium=Decimal("11"))
+        ins_svc.cancel_policy(user=self.user, company_id=self.company.id, policy_id=policy.id)
+        self.assertFalse(InsurancePolicy.objects.active().for_company(self.company.id).filter(id=policy.id).exists())
