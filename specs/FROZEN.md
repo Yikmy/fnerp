@@ -290,7 +290,63 @@ frozen
 - STEP5+ integration with purchase records must use references and service boundaries.
 - STEP5+ must not move STEP4 purchase workflows into non-purchase domains.
 
-## 8. Inherited Rules for All Later Steps
+## 8. STEP5_SALES_ENGINE (Frozen)
+### status
+frozen
+
+### owned scope
+- Sales app ownership in `backend/apps/sales/**`.
+- Entity and workflow ownership includes:
+  - `Customer`
+  - `CustomerPriceList`
+  - `PricingRule`
+  - `SalesQuote`
+  - `SalesQuoteLine`
+  - `SalesOrder`
+  - `SalesOrderLine`
+  - `Shipment`
+  - `ShipmentLine`
+  - `POD`
+  - `ShipmentStatusEvent`
+  - `RMA`
+  - `RMALine`
+
+### depends on
+- STEP1_KERNEL:
+  - company scope and RBAC contracts,
+  - module guard,
+  - audit pipeline,
+  - shared service-layer base,
+  - document-state lifecycle contracts.
+- STEP2_MASTER_DATA:
+  - reference-only usage of `Material`, `Warehouse`, `WarehouseZone`, and `BinLocation`.
+- STEP3_INVENTORY_ENGINE:
+  - reservation and stock-ledger services,
+  - inventory updates triggered by shipment and RMA workflows.
+- STEP4_PURCHASE_ENGINE:
+  - optional purchase-record references (for example, Sales Order linkage to Purchase Order) without taking accounting ownership.
+
+### forbidden downstream behavior
+- Do not duplicate `Material` / `Warehouse` / `BinLocation` or related STEP2 master-data entities.
+- Do not move purchase, inventory, or material workflow ownership into STEP5.
+- Do not implement direct stock-balance mutation or inventory-calculation logic inside STEP5.
+- Do not take over accounting ownership beyond sales-domain scope (including purchase- or inventory-side financial ownership).
+- Do not introduce reverse dependency from STEP1/STEP2/STEP3/STEP4 back to STEP5.
+
+### document / workflow contract
+- Sales documents must remain company-scoped.
+- Permission and module-guard compatibility with STEP1 contracts is required.
+- Audit compatibility for sales workflows is required.
+- `SalesQuote`, `SalesOrder`, `Shipment`, and `RMA` must use the shared document-state transition service for lifecycle transitions.
+
+### downstream rule
+- STEP6+ may depend on STEP5 sales entities and workflows.
+- STEP6+ must not rewrite STEP5 ownership boundaries.
+- STEP6+ integration with STEP5 records must use references and service boundaries.
+- STEP6+ must not move STEP5 workflows into non-sales domains or other business areas.
+- Once STEP5 is frozen, ownership boundaries and fundamental sales workflows are stable unless explicitly revised by a future frozen-contract update.
+
+## 9. Inherited Rules for All Later Steps
 - Dependency direction is one-way: earlier frozen steps -> later steps only.
 - Company scope is mandatory for business records and request handling.
 - Service-layer pattern is required; downstream business logic belongs in services.
@@ -300,7 +356,7 @@ frozen
 - Workflow backflow into earlier frozen domains is prohibited.
 - Business app API surfaces are incrementally extensible and are not globally frozen by root API foundation alone.
 
-## 9. Downstream Implementation Rule
+## 10. Downstream Implementation Rule
 - STEP3+ must use completed steps as frozen dependencies.
 - Extend capabilities through new apps and new services in later steps.
 - Do not rewrite earlier-step ownership boundaries unless a compatibility fix is explicitly required and reported.
