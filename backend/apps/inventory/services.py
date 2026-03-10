@@ -321,7 +321,7 @@ class ReservationService(InventoryDomainService):
             resource_type="inventory.reservation",
             resource_id=reservation.id,
             request=request,
-            field_diffs=[{"field": "status", "old": Reservation.Status.ACTIVE, "new": Reservation.Status.RELEASED}],
+            field_diffs=[{"field": "status", "old_value": Reservation.Status.ACTIVE, "new_value": Reservation.Status.RELEASED}],
         )
         return reservation
 
@@ -369,7 +369,7 @@ class ReservationService(InventoryDomainService):
             resource_type="inventory.reservation",
             resource_id=reservation.id,
             request=request,
-            field_diffs=[{"field": "status", "old": Reservation.Status.ACTIVE, "new": Reservation.Status.CONSUMED}],
+            field_diffs=[{"field": "status", "old_value": Reservation.Status.ACTIVE, "new_value": Reservation.Status.CONSUMED}],
         )
         return reservation
 
@@ -477,7 +477,7 @@ class WarehouseTransferService(InventoryDomainService):
             resource_type="inventory.transfer",
             resource_id=transfer.id,
             request=request,
-            field_diffs=[{"field": "status", "old": WarehouseTransfer.Status.DRAFT, "new": WarehouseTransfer.Status.SHIPPED}],
+            field_diffs=[{"field": "status", "old_value": WarehouseTransfer.Status.DRAFT, "new_value": WarehouseTransfer.Status.SHIPPED}],
         )
         return transfer
 
@@ -527,7 +527,7 @@ class WarehouseTransferService(InventoryDomainService):
             resource_type="inventory.transfer",
             resource_id=transfer.id,
             request=request,
-            field_diffs=[{"field": "status", "old": WarehouseTransfer.Status.SHIPPED, "new": WarehouseTransfer.Status.RECEIVED}],
+            field_diffs=[{"field": "status", "old_value": WarehouseTransfer.Status.SHIPPED, "new_value": WarehouseTransfer.Status.RECEIVED}],
         )
         return transfer
 
@@ -632,6 +632,6 @@ class StockCountService(InventoryDomainService):
             resource_type="inventory.stock_count",
             resource_id=count.id,
             request=request,
-            field_diffs=[{"field": "status", "old": StockCount.Status.DRAFT, "new": StockCount.Status.POSTED}],
+            field_diffs=[{"field": "status", "old_value": StockCount.Status.DRAFT, "new_value": StockCount.Status.POSTED}],
         )
         return count

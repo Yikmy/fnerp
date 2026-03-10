@@ -7,6 +7,7 @@ from django.test import TestCase
 from apps.inventory.models import Reservation, StockBalance, StockLedger
 from apps.inventory.services import ReservationService, StockCountService, StockLedgerService
 from apps.material.models import Material, MaterialCategory, UoM, Warehouse
+from audit.models import AuditFieldDiff
 from company.models import Company, CompanyMembership, CompanyModule
 from rbac.models import Permission, Role, RolePermission
 from shared.constants.permissions import PERMISSION_CODES
@@ -80,7 +81,7 @@ class Step3HealthFixTests(TestCase):
 
         balance = StockBalance.objects.get(company_id=self.company.id, warehouse=self.warehouse, material=self.material)
         self.assertEqual(balance.on_hand_qty, Decimal("6"))
-        adjust = StockLedger.objects.filter(ref_doc_type="stock_count", movement_type=StockLedger.MovementType.ADJUST).latest("created_at")
+        adjust = StockLedger.objects.filter(ref_doc_type="stock_count", movement_type=StockLedger.MovementType.ADJUST).order_by("-id").first()
         self.assertEqual(adjust.qty, Decimal("-4"))
 
     def test_reservation_consume_releases_reserved_qty(self):
@@ -140,3 +141,29 @@ class Step3HealthFixTests(TestCase):
             ledger.save()
         with self.assertRaises(ValidationError):
             ledger.delete()
+
+    def test_reservation_audit_field_diff_uses_old_value_new_value(self):
+        StockLedgerService().record_movement(
+            user=self.user,
+            company_id=self.company.id,
+            warehouse_id=self.warehouse.id,
+            material_id=self.material.id,
+            movement_type=StockLedger.MovementType.IN,
+            qty=Decimal("3"),
+            uom_id=self.uom.id,
+        )
+        reservation = ReservationService().create_reservation(
+            user=self.user,
+            company_id=self.company.id,
+            warehouse_id=self.warehouse.id,
+            material_id=self.material.id,
+            qty=Decimal("1"),
+        )
+
+        ReservationService().release_reservation(user=self.user, company_id=self.company.id, reservation_id=reservation.id)
+
+        diff = AuditFieldDiff.objects.filter(event__resource_type="inventory.reservation", event__resource_id=str(reservation.id)).order_by("-id").first()
+        self.assertEqual(diff.field, "status")
+        self.assertEqual(diff.old_value, Reservation.Status.ACTIVE)
+        self.assertEqual(diff.new_value, Reservation.Status.RELEASED)
+

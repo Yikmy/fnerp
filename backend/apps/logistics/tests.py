@@ -6,7 +6,8 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.logistics.models import FreightCharge, InsurancePolicy, ShipmentTrackingEvent
+from apps.inventory.models import StockLedger
+from apps.logistics.models import FreightCharge, InsurancePolicy, ShipmentTrackingEvent, TransportRecoveryLine
 from apps.logistics.services import (
     ContainerRecoveryService,
     FreightChargeService,
@@ -32,7 +33,7 @@ class LogisticsStep6Tests(TestCase):
 
         self.company = Company.objects.create(name="Logistics Co")
         self.other_company = Company.objects.create(name="Other Co")
-        for module in ["material", "sales", "logistics"]:
+        for module in ["material", "sales", "logistics", "inventory"]:
             CompanyModule.objects.create(company=self.company, module_code=module, is_enabled=True)
             CompanyModule.objects.create(company=self.other_company, module_code=module, is_enabled=True)
 
@@ -53,6 +54,7 @@ class LogisticsStep6Tests(TestCase):
             PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_CREATE,
             PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_UPDATE,
             PERMISSION_CODES.LOGISTICS_INSURANCE_POLICY_CANCEL,
+            PERMISSION_CODES.INVENTORY_STOCK_LEDGER_WRITE,
             "logistics.transport_order.submit_state",
             "logistics.transport_order.confirm_state",
             "logistics.transport_order.complete_state",
@@ -228,6 +230,95 @@ class LogisticsStep6Tests(TestCase):
                 shipment_id=self.shipment.id,
                 carrier="Carrier A",
             )
+
+
+    def test_transport_recovery_line_maintenance_and_company_scope(self):
+        svc = TransportOrderService()
+        row = svc.create_transport_order(user=self.user, company_id=self.company.id, shipment_id=self.shipment.id, carrier="Carrier A")
+
+        line = svc.add_recovery_line(
+            user=self.user,
+            company_id=self.company.id,
+            transport_order_id=row.id,
+            material_id=self.material.id,
+            warehouse_id=self.warehouse.id,
+            qty_actual=Decimal("2"),
+            unit_price=Decimal("3"),
+        )
+        self.assertEqual(line.line_amount, Decimal("6"))
+
+        with self.assertRaises(BusinessRuleError):
+            svc.add_recovery_line(
+                user=self.user,
+                company_id=self.company.id,
+                transport_order_id=row.id,
+                material_id=self.other_material.id,
+                warehouse_id=self.warehouse.id,
+                qty_actual=Decimal("1"),
+            )
+
+        with self.assertRaises(DjangoValidationError):
+            svc.add_recovery_line(
+                user=self.user,
+                company_id=self.company.id,
+                transport_order_id=row.id,
+                material_id=self.material.id,
+                warehouse_id=self.warehouse.id,
+                qty_actual=Decimal("0"),
+            )
+
+    def test_transport_order_complete_posts_recovery_stock_in_and_is_idempotent(self):
+        svc = TransportOrderService()
+        row = svc.create_transport_order(user=self.user, company_id=self.company.id, shipment_id=self.shipment.id, carrier="Carrier A")
+        svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.SUBMITTED)
+        svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.CONFIRMED)
+
+        line = svc.add_recovery_line(
+            user=self.user,
+            company_id=self.company.id,
+            transport_order_id=row.id,
+            material_id=self.material.id,
+            warehouse_id=self.warehouse.id,
+            qty_actual=Decimal("4"),
+        )
+
+        svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.COMPLETED)
+
+        ledgers = StockLedger.objects.filter(
+            company_id=self.company.id,
+            ref_doc_type="logistics.transport_order_recovery",
+            ref_doc_id=row.id,
+            movement_type=StockLedger.MovementType.IN,
+        )
+        self.assertEqual(ledgers.count(), 1)
+        self.assertEqual(ledgers.first().qty, line.qty_actual)
+
+        with self.assertRaises(BusinessRuleError):
+            svc.update_recovery_line(
+                user=self.user,
+                company_id=self.company.id,
+                recovery_line_id=line.id,
+                remark="no edit",
+            )
+
+        # direct re-post call should be safely idempotent
+        svc._post_transport_recovery_inventory(user=self.user, company_id=self.company.id, transport_order=row)
+        self.assertEqual(
+            StockLedger.objects.filter(company_id=self.company.id, ref_doc_type="logistics.transport_order_recovery", ref_doc_id=row.id).count(),
+            1,
+        )
+
+    def test_transport_complete_without_recovery_lines_skips_recovery_ledger(self):
+        svc = TransportOrderService()
+        row = svc.create_transport_order(user=self.user, company_id=self.company.id, shipment_id=self.shipment.id, carrier="Carrier A")
+        svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.SUBMITTED)
+        svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.CONFIRMED)
+        svc.transition_transport_order(user=self.user, company_id=self.company.id, transport_order_id=row.id, to_status=DOC_STATUS.COMPLETED)
+
+        self.assertFalse(
+            StockLedger.objects.filter(company_id=self.company.id, ref_doc_type="logistics.transport_order_recovery", ref_doc_id=row.id).exists()
+        )
+        self.assertFalse(TransportRecoveryLine.objects.filter(company_id=self.company.id, transport_order=row).exists())
 
     def test_recovery_state_flow(self):
         svc = ContainerRecoveryService()

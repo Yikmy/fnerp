@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import models
 
-from apps.material.models import Material
+from apps.material.models import Material, Warehouse
 from apps.sales.models import Customer, SalesOrder, Shipment
 from shared.constants.document import DOC_STATUS
 from shared.models.base import BaseModel
@@ -19,6 +19,12 @@ class TransportOrder(BaseModel):
     status = models.CharField(max_length=20, choices=[(s, s) for s in DOC_STATUS], default=DOC_STATUS.DRAFT)
     planned_departure = models.DateTimeField(null=True, blank=True)
     planned_arrival = models.DateTimeField(null=True, blank=True)
+    actual_departure_at = models.DateTimeField(null=True, blank=True)
+    actual_arrival_at = models.DateTimeField(null=True, blank=True)
+    receiver_name = models.CharField(max_length=120, blank=True)
+    signed_at = models.DateTimeField(null=True, blank=True)
+    completion_note = models.TextField(blank=True)
+    signoff_meta = models.JSONField(default=dict, blank=True)
 
     class Meta:
         db_table = "log_transport_order"
@@ -33,8 +39,43 @@ class TransportOrder(BaseModel):
             errors["sales_order"] = "Sales order must match shipment sales order."
         if self.planned_departure and self.planned_arrival and self.planned_arrival < self.planned_departure:
             errors["planned_arrival"] = "planned_arrival cannot be earlier than planned_departure."
+        if self.actual_departure_at and self.actual_arrival_at and self.actual_arrival_at < self.actual_departure_at:
+            errors["actual_arrival_at"] = "actual_arrival_at cannot be earlier than actual_departure_at."
         if errors:
             raise DjangoValidationError(errors)
+
+
+class TransportRecoveryLine(BaseModel):
+    transport_order = models.ForeignKey(TransportOrder, on_delete=models.CASCADE, related_name="recovery_lines")
+    material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="transport_recovery_lines")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="transport_recovery_lines")
+    qty_actual = models.DecimalField(max_digits=20, decimal_places=6)
+    unit_price = models.DecimalField(max_digits=20, decimal_places=6, default=Decimal("0"))
+    line_amount = models.DecimalField(max_digits=20, decimal_places=6, default=Decimal("0"))
+    condition_code = models.CharField(max_length=64, blank=True)
+    remark = models.TextField(blank=True)
+
+    class Meta:
+        db_table = "log_transport_recovery_line"
+
+    def clean(self):
+        errors = {}
+        if self.transport_order_id and self.transport_order.company_id != self.company_id:
+            errors["transport_order"] = "Transport order company must match recovery line company."
+        if self.material_id and self.material.company_id != self.company_id:
+            errors["material"] = "Material company must match recovery line company."
+        if self.warehouse_id and self.warehouse.company_id != self.company_id:
+            errors["warehouse"] = "Warehouse company must match recovery line company."
+        if self.qty_actual is not None and self.qty_actual <= 0:
+            errors["qty_actual"] = "qty_actual must be greater than zero."
+        if self.transport_order_id and self.warehouse_id and self.transport_order.company_id != self.warehouse.company_id:
+            errors["warehouse"] = "Warehouse company must match transport order company."
+        if errors:
+            raise DjangoValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.line_amount = (self.qty_actual or Decimal("0")) * (self.unit_price or Decimal("0"))
+        super().save(*args, **kwargs)
 
 
 class ShipmentTrackingEvent(BaseModel):
