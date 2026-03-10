@@ -52,3 +52,10 @@ class PERMISSION_CODES(StrEnum):
     LOGISTICS_INSURANCE_POLICY_CREATE = "logistics.insurance_policy.create"
     LOGISTICS_INSURANCE_POLICY_UPDATE = "logistics.insurance_policy.update"
     LOGISTICS_INSURANCE_POLICY_CANCEL = "logistics.insurance_policy.cancel"
+
+    PRODUCTION_BOM_CREATE = "production.bom.create"
+    PRODUCTION_MO_CREATE = "production.mo.create"
+    PRODUCTION_MO_ISSUE = "production.mo.issue"
+    PRODUCTION_MO_RECEIPT = "production.mo.receipt"
+    PRODUCTION_QC_CREATE = "production.qc.create"
+    PRODUCTION_IOT_DEVICE_CREATE = "production.iot_device.create"

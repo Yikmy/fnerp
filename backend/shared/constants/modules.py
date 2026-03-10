@@ -13,3 +13,4 @@ class MODULE_CODES(StrEnum):
     PURCHASE = "purchase"
     SALES = "sales"
     LOGISTICS = "logistics"
+    PRODUCTION = "production"
