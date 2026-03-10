@@ -18,7 +18,9 @@ from apps.production.services import (
 )
 from apps.sales.models import Customer, SalesOrder, SalesOrderLine
 from company.models import Company, CompanyMembership, CompanyModule
+from doc.models import DocumentStateMachineDef, DocumentTransitionLog
 from rbac.models import Permission, Role, RolePermission
+from shared.constants.document import DOC_STATUS
 from shared.constants.permissions import PERMISSION_CODES
 from shared.exceptions import BusinessRuleError
 
@@ -27,9 +29,10 @@ class ProductionEngineTests(TestCase):
     def setUp(self):
         user_model = get_user_model()
         self.user = user_model.objects.create_user(username="prod_user", password="pwd")
+        self.no_perm_user = user_model.objects.create_user(username="no_perm_user", password="pwd")
 
         self.company = Company.objects.create(name="Production Co")
-        for module in ["production", "inventory", "sales"]:
+        for module in ["production", "inventory", "sales", "doc"]:
             CompanyModule.objects.create(company=self.company, module_code=module, is_enabled=True)
 
         self.role = Role.objects.create(code="prod-role", name="Production Role")
@@ -38,6 +41,7 @@ class ProductionEngineTests(TestCase):
             PERMISSION_CODES.PRODUCTION_MO_CREATE,
             PERMISSION_CODES.PRODUCTION_MO_ISSUE,
             PERMISSION_CODES.PRODUCTION_MO_RECEIPT,
+            PERMISSION_CODES.PRODUCTION_MO_TRANSITION,
             PERMISSION_CODES.PRODUCTION_PLAN_CREATE,
             PERMISSION_CODES.PRODUCTION_PLAN_UPDATE,
             PERMISSION_CODES.PRODUCTION_QC_CREATE,
@@ -45,11 +49,30 @@ class ProductionEngineTests(TestCase):
             PERMISSION_CODES.PRODUCTION_IOT_METRIC_CREATE,
             PERMISSION_CODES.INVENTORY_STOCK_LEDGER_WRITE,
             PERMISSION_CODES.INVENTORY_RESERVATION_CONSUME,
+            "production.mo.submit",
+            "production.mo.confirm",
+            "production.mo.complete",
+            "production.mo.cancel",
         ]:
             perm = Permission.objects.create(code=code, name=code)
             RolePermission.objects.create(role=self.role, permission=perm)
 
         CompanyMembership.objects.create(user=self.user, company=self.company, role=self.role, is_active=True)
+        CompanyMembership.objects.create(user=self.no_perm_user, company=self.company, role=None, is_active=True)
+
+        transition_specs = {
+            DOC_STATUS.DRAFT: [(DOC_STATUS.SUBMITTED, "production.mo.submit"), (DOC_STATUS.CANCELLED, "production.mo.cancel")],
+            DOC_STATUS.SUBMITTED: [(DOC_STATUS.CONFIRMED, "production.mo.confirm"), (DOC_STATUS.CANCELLED, "production.mo.cancel")],
+            DOC_STATUS.CONFIRMED: [(DOC_STATUS.COMPLETED, "production.mo.complete"), (DOC_STATUS.CANCELLED, "production.mo.cancel")],
+        }
+        for from_state, rows in transition_specs.items():
+            for to_state, perm in rows:
+                DocumentStateMachineDef.objects.create(
+                    document_type="production.manufacturing_order",
+                    from_state=from_state.value,
+                    to_state=to_state.value,
+                    permission_code=perm,
+                )
 
         self.uom = UoM.objects.create(company_id=self.company.id, name="EA", symbol="ea", ratio_to_base=Decimal("1"))
         self.category = MaterialCategory.objects.create(company_id=self.company.id, name="FG")
@@ -69,7 +92,7 @@ class ProductionEngineTests(TestCase):
         )
 
         self.other_company = Company.objects.create(name="Other Co")
-        for module in ["production", "inventory", "sales"]:
+        for module in ["production", "inventory", "sales", "doc"]:
             CompanyModule.objects.create(company=self.other_company, module_code=module, is_enabled=True)
         self.other_uom = UoM.objects.create(company_id=self.other_company.id, name="EA", symbol="ea", ratio_to_base=Decimal("1"))
         self.other_category = MaterialCategory.objects.create(company_id=self.other_company.id, name="FG")
@@ -92,6 +115,58 @@ class ProductionEngineTests(TestCase):
             qty=qty,
             uom_id=self.uom.id,
         )
+
+    def test_mo_state_machine_transition_and_log(self):
+        svc = ManufacturingOrderService()
+        mo = svc.create_order(
+            user=self.user,
+            company_id=self.company.id,
+            doc_no="MO-TS",
+            product_material_id=self.fg.id,
+            planned_qty=Decimal("2"),
+            warehouse_id=self.warehouse.id,
+        )
+        self.assertEqual(mo.status, DOC_STATUS.DRAFT)
+
+        mo = svc.transition_order(user=self.user, company_id=self.company.id, order_id=mo.id, to_state=DOC_STATUS.SUBMITTED)
+        self.assertEqual(mo.status, DOC_STATUS.SUBMITTED)
+
+        mo = svc.transition_order(user=self.user, company_id=self.company.id, order_id=mo.id, to_state=DOC_STATUS.CONFIRMED)
+        self.assertEqual(mo.status, DOC_STATUS.CONFIRMED)
+
+        self.assertTrue(DocumentTransitionLog.objects.filter(
+            company_id=self.company.id,
+            document_type="production.manufacturing_order",
+            document_id=mo.id,
+            from_state=DOC_STATUS.SUBMITTED,
+            to_state=DOC_STATUS.CONFIRMED,
+        ).exists())
+
+    def test_mo_transition_guard_and_permissions(self):
+        mo = ManufacturingOrderService().create_order(
+            user=self.user,
+            company_id=self.company.id,
+            doc_no="MO-PERM",
+            product_material_id=self.fg.id,
+            planned_qty=Decimal("1"),
+            warehouse_id=self.warehouse.id,
+        )
+
+        with self.assertRaises(Exception):
+            ManufacturingOrderService().transition_order(
+                user=self.user,
+                company_id=self.company.id,
+                order_id=mo.id,
+                to_state=DOC_STATUS.CONFIRMED,
+            )
+
+        with self.assertRaises(Exception):
+            ManufacturingOrderService().transition_order(
+                user=self.no_perm_user,
+                company_id=self.company.id,
+                order_id=mo.id,
+                to_state=DOC_STATUS.SUBMITTED,
+            )
 
     def test_mto_requires_sales_order_material_alignment(self):
         service = ManufacturingOrderService()
@@ -131,6 +206,18 @@ class ProductionEngineTests(TestCase):
             warehouse_id=self.warehouse.id,
             production_mode=ManufacturingOrder.ProductionMode.MAKE_TO_ORDER,
             sales_order_id=self.sales_order.id,
+        )
+        mo = ManufacturingOrderService().transition_order(
+            user=self.user,
+            company_id=self.company.id,
+            order_id=mo.id,
+            to_state=DOC_STATUS.SUBMITTED,
+        )
+        mo = ManufacturingOrderService().transition_order(
+            user=self.user,
+            company_id=self.company.id,
+            order_id=mo.id,
+            to_state=DOC_STATUS.CONFIRMED,
         )
         reservation = Reservation.objects.create(
             company_id=self.company.id,
@@ -172,16 +259,39 @@ class ProductionEngineTests(TestCase):
         reservation.refresh_from_db()
         self.assertEqual(reservation.status, Reservation.Status.CONSUMED)
 
-    def test_mts_issue_can_work_without_reservation(self):
+    def test_issue_receipt_blocked_by_state(self):
         self._seed_rm_stock(qty=Decimal("8"))
         mo = ManufacturingOrderService().create_order(
             user=self.user,
             company_id=self.company.id,
-            doc_no="MO-MTS",
+            doc_no="MO-STATE",
             product_material_id=self.fg.id,
             planned_qty=Decimal("2"),
             warehouse_id=self.warehouse.id,
             production_mode=ManufacturingOrder.ProductionMode.MAKE_TO_STOCK,
+        )
+
+        with self.assertRaises(BusinessRuleError):
+            ManufacturingOrderService().issue_material(
+                user=self.user,
+                company_id=self.company.id,
+                mo_id=mo.id,
+                component_material_id=self.rm.id,
+                required_qty=Decimal("2"),
+                issued_qty=Decimal("2"),
+            )
+
+        mo = ManufacturingOrderService().transition_order(
+            user=self.user,
+            company_id=self.company.id,
+            order_id=mo.id,
+            to_state=DOC_STATUS.SUBMITTED,
+        )
+        mo = ManufacturingOrderService().transition_order(
+            user=self.user,
+            company_id=self.company.id,
+            order_id=mo.id,
+            to_state=DOC_STATUS.CONFIRMED,
         )
 
         ManufacturingOrderService().issue_material(
@@ -192,7 +302,28 @@ class ProductionEngineTests(TestCase):
             required_qty=Decimal("2"),
             issued_qty=Decimal("2"),
         )
-        self.assertTrue(StockLedger.objects.filter(ref_doc_type="production.mo_issue").exists())
+        ManufacturingOrderService().receipt_finished_goods(
+            user=self.user,
+            company_id=self.company.id,
+            mo_id=mo.id,
+            received_qty=Decimal("2"),
+        )
+
+        mo = ManufacturingOrderService().transition_order(
+            user=self.user,
+            company_id=self.company.id,
+            order_id=mo.id,
+            to_state=DOC_STATUS.COMPLETED,
+        )
+        with self.assertRaises(BusinessRuleError):
+            ManufacturingOrderService().issue_material(
+                user=self.user,
+                company_id=self.company.id,
+                mo_id=mo.id,
+                component_material_id=self.rm.id,
+                required_qty=Decimal("1"),
+                issued_qty=Decimal("1"),
+            )
 
     def test_plan_qc_iot_services_have_guarded_paths(self):
         mo = ManufacturingOrderService().create_order(
@@ -203,6 +334,12 @@ class ProductionEngineTests(TestCase):
             planned_qty=Decimal("1"),
             warehouse_id=self.warehouse.id,
             production_mode=ManufacturingOrder.ProductionMode.MAKE_TO_STOCK,
+        )
+        mo = ManufacturingOrderService().transition_order(
+            user=self.user,
+            company_id=self.company.id,
+            order_id=mo.id,
+            to_state=DOC_STATUS.SUBMITTED,
         )
 
         plan = ProductionPlanService().create_plan(
@@ -269,9 +406,12 @@ class ProductionEngineTests(TestCase):
             planned_qty=Decimal("1"),
             warehouse_id=self.warehouse.id,
         )
-
-        other_device_owner_company = Company.objects.create(name="Third Co")
-        CompanyModule.objects.create(company=other_device_owner_company, module_code="production", is_enabled=True)
+        mo = ManufacturingOrderService().transition_order(
+            user=self.user,
+            company_id=self.company.id,
+            order_id=mo.id,
+            to_state=DOC_STATUS.SUBMITTED,
+        )
 
         other_lot = Lot.objects.create(company_id=self.other_company.id, material=self.other_material, lot_code="LOT-O")
         with self.assertRaises(DjangoValidationError):

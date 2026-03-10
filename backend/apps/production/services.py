@@ -6,6 +6,8 @@ from apps.inventory.models import Reservation, StockLedger
 from apps.inventory.services import ReservationService, StockLedgerService
 from apps.material.models import Material, Warehouse
 from apps.sales.models import SalesOrder
+from doc.services import DocumentStateTransitionService
+from shared.constants.document import DOC_STATUS
 from shared.constants.modules import MODULE_CODES
 from shared.constants.permissions import PERMISSION_CODES
 from shared.exceptions import BusinessRuleError
@@ -21,6 +23,10 @@ class ProductionDomainService(BaseService):
     @staticmethod
     def _user_id(user):
         return getattr(user, "id", None)
+
+    @staticmethod
+    def _status_value(status):
+        return getattr(status, "value", status)
 
     def _ensure_module_enabled(self, *, company_id):
         if not ModuleGuardService.check_module_enabled(company_id=company_id, module_code=self.MODULE_CODE):
@@ -76,6 +82,7 @@ class BOMService(ProductionDomainService):
             created_by=self._user_id(user),
             updated_by=self._user_id(user),
         )
+        bom.full_clean()
         bom.save()
 
         for line in lines or []:
@@ -100,11 +107,33 @@ class ManufacturingOrderService(ProductionDomainService):
     PERM_CREATE = PERMISSION_CODES.PRODUCTION_MO_CREATE
     PERM_ISSUE = PERMISSION_CODES.PRODUCTION_MO_ISSUE
     PERM_RECEIPT = PERMISSION_CODES.PRODUCTION_MO_RECEIPT
+    PERM_TRANSITION = PERMISSION_CODES.PRODUCTION_MO_TRANSITION
+
+    DOC_TYPE = "production.manufacturing_order"
 
     def __init__(self):
         super().__init__()
         self.reservation_service = ReservationService()
         self.ledger_service = StockLedgerService()
+        self.transition_service = DocumentStateTransitionService()
+        self.transition_service.DEFAULT_TRANSITIONS = {
+            DOC_STATUS.DRAFT: {
+                DOC_STATUS.SUBMITTED: "production.mo.submit",
+                DOC_STATUS.CANCELLED: "production.mo.cancel",
+            },
+            DOC_STATUS.SUBMITTED: {
+                DOC_STATUS.CONFIRMED: "production.mo.confirm",
+                DOC_STATUS.CANCELLED: "production.mo.cancel",
+            },
+            DOC_STATUS.CONFIRMED: {
+                DOC_STATUS.COMPLETED: "production.mo.complete",
+                DOC_STATUS.CANCELLED: "production.mo.cancel",
+            },
+            DOC_STATUS.COMPLETED: {
+                DOC_STATUS.CANCELLED: "production.mo.cancel",
+            },
+            DOC_STATUS.CANCELLED: {},
+        }
 
     @transaction.atomic
     def create_order(self, *, user, company_id, doc_no, product_material_id, planned_qty, warehouse_id, production_mode=ManufacturingOrder.ProductionMode.MAKE_TO_STOCK, sales_order_id=None, start_date=None, due_date=None, request=None) -> ManufacturingOrder:
@@ -125,13 +154,44 @@ class ManufacturingOrderService(ProductionDomainService):
             sales_order=sales_order,
             start_date=start_date,
             due_date=due_date,
+            status=self._status_value(DOC_STATUS.DRAFT),
             created_by=self._user_id(user),
             updated_by=self._user_id(user),
         )
         self._validate_mto_alignment(mo=order)
         order.save()
-        self.audit_crud(user=user, company_id=company_id, operation="create", resource_type="production.manufacturing_order", resource_id=order.id, request=request)
+        self.audit_crud(user=user, company_id=company_id, operation="create", resource_type=self.DOC_TYPE, resource_id=order.id, request=request)
         return order
+
+    @transaction.atomic
+    def transition_order(self, *, user, company_id, order_id, to_state, notes="", request=None) -> ManufacturingOrder:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_TRANSITION)
+
+        order = ManufacturingOrder.objects.active().for_company(company_id).filter(id=order_id).first()
+        if order is None:
+            raise BusinessRuleError("Manufacturing order not found in company scope")
+        self._validate_mto_alignment(mo=order)
+
+        return self.transition_service.transition(
+            user=user,
+            company_id=company_id,
+            document=order,
+            document_type=self.DOC_TYPE,
+            to_state=self._status_value(to_state),
+            notes=notes,
+            request=request,
+        )
+
+    @staticmethod
+    def _ensure_issue_allowed_state(*, mo: ManufacturingOrder):
+        if mo.status in {DOC_STATUS.DRAFT.value, DOC_STATUS.CANCELLED.value, DOC_STATUS.COMPLETED.value}:
+            raise BusinessRuleError("Manufacturing order status does not allow material issue")
+
+    @staticmethod
+    def _ensure_receipt_allowed_state(*, mo: ManufacturingOrder):
+        if mo.status in {DOC_STATUS.DRAFT.value, DOC_STATUS.CANCELLED.value, DOC_STATUS.COMPLETED.value}:
+            raise BusinessRuleError("Manufacturing order status does not allow finished goods receipt")
 
     @transaction.atomic
     def issue_material(self, *, user, company_id, mo_id, component_material_id, required_qty, issued_qty, reservation_id=None, request=None) -> MOIssueLine:
@@ -140,6 +200,7 @@ class ManufacturingOrderService(ProductionDomainService):
 
         mo = self._mo(company_id=company_id, mo_id=mo_id)
         self._validate_mto_alignment(mo=mo)
+        self._ensure_issue_allowed_state(mo=mo)
         material = self._material(company_id=company_id, material_id=component_material_id)
 
         reservation = None
@@ -200,6 +261,7 @@ class ManufacturingOrderService(ProductionDomainService):
 
         mo = self._mo(company_id=company_id, mo_id=mo_id)
         self._validate_mto_alignment(mo=mo)
+        self._ensure_receipt_allowed_state(mo=mo)
 
         receipt = MOReceiptLine(
             company_id=company_id,
@@ -284,9 +346,13 @@ class ProductionQCService(ProductionDomainService):
         self._ensure_module_enabled(company_id=company_id)
         self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
 
+        mo = self._mo(company_id=company_id, mo_id=mo_id)
+        if mo.status in {DOC_STATUS.CANCELLED.value, DOC_STATUS.COMPLETED.value}:
+            raise BusinessRuleError("QC cannot be recorded for completed or cancelled manufacturing order")
+
         qc = ProductionQC(
             company_id=company_id,
-            mo=self._mo(company_id=company_id, mo_id=mo_id),
+            mo=mo,
             stage=stage,
             result=result,
             inspector_id=inspector_id,

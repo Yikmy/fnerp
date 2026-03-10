@@ -4,6 +4,7 @@ from django.db import models
 from apps.inventory.models import Lot, Reservation
 from apps.material.models import Material, Warehouse
 from apps.sales.models import SalesOrder
+from shared.constants.document import DOC_STATUS
 from shared.models.base import BaseModel
 
 
@@ -89,13 +90,6 @@ class ManufacturingOrder(BaseModel):
         MAKE_TO_STOCK = "mts", "Make To Stock"
         MAKE_TO_ORDER = "mto", "Make To Order"
 
-    class Status(models.TextChoices):
-        DRAFT = "draft", "Draft"
-        RELEASED = "released", "Released"
-        IN_PROGRESS = "in_progress", "In Progress"
-        COMPLETED = "completed", "Completed"
-        CANCELLED = "cancelled", "Cancelled"
-
     doc_no = models.CharField(max_length=64)
     product_material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="manufacturing_orders")
     planned_qty = models.DecimalField(max_digits=20, decimal_places=6)
@@ -115,7 +109,7 @@ class ManufacturingOrder(BaseModel):
     start_date = models.DateField(null=True, blank=True)
     due_date = models.DateField(null=True, blank=True)
     progress_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    status = models.CharField(max_length=20, choices=[(value.value, value.value) for value in DOC_STATUS], default=DOC_STATUS.DRAFT.value)
 
     class Meta:
         db_table = "prd_manufacturing_order"
