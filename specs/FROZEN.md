@@ -346,7 +346,67 @@ frozen
 - STEP6+ must not move STEP5 workflows into non-sales domains or other business areas.
 - Once STEP5 is frozen, ownership boundaries and fundamental sales workflows are stable unless explicitly revised by a future frozen-contract update.
 
-## 9. Inherited Rules for All Later Steps
+## 9. STEP6_LOGISTICS_ENGINE (Frozen)
+### status
+frozen
+
+### owned scope
+- Logistics app ownership in `backend/apps/logistics/**`.
+- Entity and workflow ownership includes:
+  - `TransportOrder`
+  - `TransportRecoveryLine`
+  - `ShipmentTrackingEvent`
+  - `ContainerRecoveryPlan`
+  - `ContainerRecoveryLine`
+  - `FreightCharge`
+  - `InsurancePolicy`
+
+### depends on
+- STEP1_KERNEL:
+  - company scope and RBAC contracts,
+  - module guard,
+  - audit pipeline,
+  - shared service-layer base,
+  - shared document-state lifecycle contracts and transition logging infrastructure.
+- STEP2_MASTER_DATA:
+  - `Material`, `Warehouse`, `WarehouseZone`, and `BinLocation` by reference only where required.
+- STEP3_INVENTORY_ENGINE:
+  - inventory service boundary for logistics-triggered stock side effects,
+  - reservation / ledger / movement consistency ownership remains in STEP3.
+- STEP4_PURCHASE_ENGINE:
+  - purchase-side references only where required by freight, inbound logistics, or procurement-linked logistics scenarios,
+  - no purchase workflow takeover.
+- STEP5_SALES_ENGINE:
+  - sales-side references for sales-to-logistics linkage (including shipment and sales-order orchestration) by reference only,
+  - no sales workflow takeover.
+
+### forbidden downstream behavior
+- Do not duplicate STEP2 master data in STEP6.
+- Do not create parallel material / warehouse / bin / customer / shipment master tables in STEP6.
+- Do not move logistics workflow ownership into STEP2, STEP3, STEP4, or STEP5 apps.
+- Do not implement direct stock-balance mutation or inventory-calculation logic inside STEP6.
+- Do not take over accounting ownership merely because freight or insurance records exist in STEP6.
+- Do not introduce reverse dependency from STEP1/STEP2/STEP3/STEP4/STEP5 back to STEP6.
+- Do not bypass shared document lifecycle conventions with a parallel kernel-like state machine.
+- Do not reinterpret sales, purchase, or inventory records as STEP6-owned documents.
+
+### document / workflow contract
+- STEP6 records must remain company-scoped.
+- Permission and module-guard compatibility with STEP1 contracts is required.
+- Audit compatibility for logistics workflows is required.
+- Logistics document/workflow transitions must remain compatible with shared document-state lifecycle conventions.
+- STEP6 may implement service-level workflow progression, but must not redefine kernel document-state ownership.
+- Any inventory side effects triggered by logistics actions must go through STEP3 inventory ownership boundary and service orchestration.
+- Any sales-to-logistics linkage must remain reference/service-boundary based and must not pull STEP5 ownership into STEP6.
+- Any purchase-linked freight or inbound logistics linkage must remain reference/service-boundary based and must not pull STEP4 ownership into STEP6.
+
+### downstream rule
+- STEP7+ may depend on STEP6 logistics entities/services.
+- STEP7+ must not rewrite STEP6 ownership boundaries.
+- STEP7+ integration with logistics records must use references and service boundaries.
+- STEP7+ must not move STEP6 logistics workflows into non-logistics domains.
+
+## 10. Inherited Rules for All Later Steps
 - Dependency direction is one-way: earlier frozen steps -> later steps only.
 - Company scope is mandatory for business records and request handling.
 - Service-layer pattern is required; downstream business logic belongs in services.
@@ -356,7 +416,7 @@ frozen
 - Workflow backflow into earlier frozen domains is prohibited.
 - Business app API surfaces are incrementally extensible and are not globally frozen by root API foundation alone.
 
-## 10. Downstream Implementation Rule
+## 11. Downstream Implementation Rule
 - STEP3+ must use completed steps as frozen dependencies.
 - Extend capabilities through new apps and new services in later steps.
 - Do not rewrite earlier-step ownership boundaries unless a compatibility fix is explicitly required and reported.
