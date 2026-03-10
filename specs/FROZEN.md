@@ -406,7 +406,113 @@ frozen
 - STEP7+ integration with logistics records must use references and service boundaries.
 - STEP7+ must not move STEP6 logistics workflows into non-logistics domains.
 
-## 10. Inherited Rules for All Later Steps
+## 10. STEP7_PRODUCTION_ENGINE (Frozen)
+### status
+frozen
+
+### ownership
+- STEP7 owns production engine behavior only.
+- STEP7 app ownership is `backend/apps/production/**`.
+- Earlier steps must not own production workflow logic.
+- STEP7 must not leak production workflow logic into material / inventory / purchase / sales / logistics apps.
+
+### stable entities
+- Document-like main object:
+  - `ManufacturingOrder` (primary production document in STEP7).
+- Supporting entities / records:
+  - `BOM`
+  - `BOMLine`
+  - `ProductionPlan`
+  - `MOIssueLine`
+  - `MOReceiptLine`
+  - `ProductionQC`
+  - `IoTDevice`
+  - `IoTMetric`
+- Not currently frozen as unified document-state main objects:
+  - `ProductionPlan`
+  - `ProductionQC`
+  - `IoTDevice`
+  - `IoTMetric`
+
+### manufacturing order primary-document contract
+- `ManufacturingOrder` is the primary production document for STEP7.
+- `ManufacturingOrder.status` is aligned to unified `DOC_STATUS` (`DRAFT`, `SUBMITTED`, `CONFIRMED`, `COMPLETED`, `CANCELLED`).
+- `ManufacturingOrder` lifecycle transitions must use `DocumentStateTransitionService`.
+- Direct status mutation that bypasses transition service is not an allowed workflow path.
+- Later steps must not bypass transition service to manipulate `ManufacturingOrder` status.
+
+### manufacturing order state-machine contract
+- Frozen status set: `DRAFT` / `SUBMITTED` / `CONFIRMED` / `COMPLETED` / `CANCELLED`.
+- Frozen transition baseline:
+  - `DRAFT -> SUBMITTED | CANCELLED`
+  - `SUBMITTED -> CONFIRMED | CANCELLED`
+  - `CONFIRMED -> COMPLETED | CANCELLED`
+  - `COMPLETED -> CANCELLED`
+  - `CANCELLED` terminal (no outgoing transition).
+- Transition path is guarded by:
+  - module guard and company module enablement,
+  - permission checks,
+  - company scope lookup,
+  - transition logging and audit hooks.
+- `issue_material` and `receipt_finished_goods` are state-guarded and are blocked at least in `DRAFT`, `COMPLETED`, `CANCELLED`.
+- After `COMPLETED` or `CANCELLED`, key inventory-affecting production actions must not continue.
+
+### production-mode (MTS / MTO) contract
+- `ManufacturingOrder` owns `production_mode` with at least:
+  - `MTS` (`mts`, make-to-stock),
+  - `MTO` (`mto`, make-to-order).
+- `MTO` requires linked `sales_order`.
+- `MTO` requires product-material alignment with linked `SalesOrderLine.material`.
+- `MTO` issue flow requires active reservation and strict quantity alignment (`issued_qty == reservation.qty`).
+- `MTS` cannot masquerade as sales-driven order (`MTS` forbids `sales_order` linkage).
+- Later steps must not weaken MTS/MTO constraints above.
+
+### inventory / reservation boundary contract (STEP3 reuse only)
+- STEP7 does not own inventory ledger / reservation / balance engine.
+- STEP7 must not duplicate or re-implement inventory engine behavior inside production app.
+- Inventory side effects from production must go through STEP3 frozen service boundaries.
+- `issue_material` and `receipt_finished_goods` must post movements through STEP3 services (`ReservationService`, `StockLedgerService`).
+- Reservation consume semantics used by STEP7 are strict-match semantics, not partial-consume semantics:
+  - when a reservation is consumed by MO issue, `issued_qty` must strictly match reservation quantity semantics.
+- Later steps must not introduce parallel reservation-consume logic inside STEP7.
+
+### service-layer contract
+- STEP7 business workflow entrypoints are service-owned boundaries in `backend/apps/production/services.py`.
+- Production core workflow logic must not be moved into model `save`, admin, or controller/view layers.
+- Frozen service-owned behaviors include:
+  - create BOM,
+  - create/update `ProductionPlan`,
+  - create/transition `ManufacturingOrder`,
+  - `issue_material`,
+  - `receipt_finished_goods`,
+  - create `ProductionQC`,
+  - register `IoTDevice`,
+  - record `IoTMetric`.
+
+### company-scope contract
+- STEP7-related object access must stay inside company scope.
+- Service layer must use scoped lookup (`active().for_company(...)`) for referenced entities.
+- Cross-company references are invalid for production workflow operations.
+- Key models keep minimal data-integrity protection via model validation (`clean` / `full_clean`) to reduce dirty writes that bypass service-level checks.
+- Later steps must not depend on cross-company references "accidentally working".
+
+### dependency direction contract
+- STEP7 may depend on STEP1–STEP6 contracts.
+- STEP1–STEP6 must not depend on STEP7.
+- STEP7 may reference STEP2 master data (`Material`, `Warehouse`).
+- STEP7 may call STEP3 services for inventory and reservation side effects.
+- STEP7 may reference STEP5 sales documents for MTO linkage.
+- STEP7 must not back-inject production workflow ownership into earlier-step apps.
+
+### deferred / not frozen in STEP7
+- `ProductionPlan` is not frozen as a unified document-state-machine main object in current STEP7 baseline.
+- `ProductionQC` is not frozen as a unified document-state-machine main object.
+- `IoTDevice` / `IoTMetric` are frozen as entities and service entrypoints only; deep IoT ingestion/automation platform integration is deferred.
+- STEP8 accounting postings for production/inventory financial impacts are deferred.
+- STEP9 automation/orchestration over production workflow is deferred.
+- STEP10 platform-level abstractions and cross-domain orchestration framework are deferred.
+
+## 11. Inherited Rules for All Later Steps
 - Dependency direction is one-way: earlier frozen steps -> later steps only.
 - Company scope is mandatory for business records and request handling.
 - Service-layer pattern is required; downstream business logic belongs in services.
@@ -416,7 +522,7 @@ frozen
 - Workflow backflow into earlier frozen domains is prohibited.
 - Business app API surfaces are incrementally extensible and are not globally frozen by root API foundation alone.
 
-## 11. Downstream Implementation Rule
+## 12. Downstream Implementation Rule
 - STEP3+ must use completed steps as frozen dependencies.
 - Extend capabilities through new apps and new services in later steps.
 - Do not rewrite earlier-step ownership boundaries unless a compatibility fix is explicitly required and reported.
