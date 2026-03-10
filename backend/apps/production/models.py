@@ -3,6 +3,7 @@ from django.db import models
 
 from apps.inventory.models import Lot, Reservation
 from apps.material.models import Material, Warehouse
+from apps.sales.models import SalesOrder
 from shared.models.base import BaseModel
 
 
@@ -84,6 +85,10 @@ class ProductionPlan(BaseModel):
 
 
 class ManufacturingOrder(BaseModel):
+    class ProductionMode(models.TextChoices):
+        MAKE_TO_STOCK = "mts", "Make To Stock"
+        MAKE_TO_ORDER = "mto", "Make To Order"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         RELEASED = "released", "Released"
@@ -95,6 +100,18 @@ class ManufacturingOrder(BaseModel):
     product_material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="manufacturing_orders")
     planned_qty = models.DecimalField(max_digits=20, decimal_places=6)
     warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="manufacturing_orders")
+    production_mode = models.CharField(
+        max_length=16,
+        choices=ProductionMode.choices,
+        default=ProductionMode.MAKE_TO_STOCK,
+    )
+    sales_order = models.ForeignKey(
+        SalesOrder,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="manufacturing_orders",
+    )
     start_date = models.DateField(null=True, blank=True)
     due_date = models.DateField(null=True, blank=True)
     progress_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -110,6 +127,15 @@ class ManufacturingOrder(BaseModel):
             errors["product_material"] = "Product material company must match manufacturing order company."
         if self.warehouse_id and self.warehouse.company_id != self.company_id:
             errors["warehouse"] = "Warehouse company must match manufacturing order company."
+        if self.sales_order_id and self.sales_order.company_id != self.company_id:
+            errors["sales_order"] = "Sales order company must match manufacturing order company."
+        if self.production_mode == self.ProductionMode.MAKE_TO_ORDER:
+            if not self.sales_order_id:
+                errors["sales_order"] = "MTO manufacturing order requires sales_order."
+            elif self.product_material_id and not self.sales_order.lines.filter(material_id=self.product_material_id).exists():
+                errors["product_material"] = "MTO product material must exist in linked sales order lines."
+        elif self.production_mode == self.ProductionMode.MAKE_TO_STOCK and self.sales_order_id:
+            errors["sales_order"] = "MTS manufacturing order cannot link a sales_order."
         if self.planned_qty is not None and self.planned_qty <= 0:
             errors["planned_qty"] = "planned_qty must be greater than zero."
         if self.progress_percent is not None and (self.progress_percent < 0 or self.progress_percent > 100):
@@ -118,6 +144,10 @@ class ManufacturingOrder(BaseModel):
             errors["due_date"] = "due_date cannot be earlier than start_date."
         if errors:
             raise DjangoValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class MOIssueLine(BaseModel):
@@ -152,6 +182,10 @@ class MOIssueLine(BaseModel):
         if errors:
             raise DjangoValidationError(errors)
 
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
 
 class MOReceiptLine(BaseModel):
     mo = models.ForeignKey(ManufacturingOrder, on_delete=models.CASCADE, related_name="receipt_lines")
@@ -180,6 +214,10 @@ class MOReceiptLine(BaseModel):
         if errors:
             raise DjangoValidationError(errors)
 
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
 
 class ProductionQC(BaseModel):
     class Stage(models.TextChoices):
@@ -204,6 +242,10 @@ class ProductionQC(BaseModel):
     def clean(self):
         if self.mo_id and self.mo.company_id != self.company_id:
             raise DjangoValidationError({"mo": "Manufacturing order company must match QC record company."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class IoTDevice(BaseModel):
@@ -239,3 +281,7 @@ class IoTMetric(BaseModel):
     def clean(self):
         if self.device_id and self.device.company_id != self.company_id:
             raise DjangoValidationError({"device": "Device company must match metric company."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)

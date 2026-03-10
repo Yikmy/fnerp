@@ -59,3 +59,6 @@ class PERMISSION_CODES(StrEnum):
     PRODUCTION_MO_RECEIPT = "production.mo.receipt"
     PRODUCTION_QC_CREATE = "production.qc.create"
     PRODUCTION_IOT_DEVICE_CREATE = "production.iot_device.create"
+    PRODUCTION_IOT_METRIC_CREATE = "production.iot_metric.create"
+    PRODUCTION_PLAN_CREATE = "production.plan.create"
+    PRODUCTION_PLAN_UPDATE = "production.plan.update"

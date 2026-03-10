@@ -5,13 +5,14 @@ from django.db import transaction
 from apps.inventory.models import Reservation, StockLedger
 from apps.inventory.services import ReservationService, StockLedgerService
 from apps.material.models import Material, Warehouse
+from apps.sales.models import SalesOrder
 from shared.constants.modules import MODULE_CODES
 from shared.constants.permissions import PERMISSION_CODES
 from shared.exceptions import BusinessRuleError
 from shared.services.base import BaseService
 from shared.services.module_guard import ModuleGuardService
 
-from .models import BOM, BOMLine, MOIssueLine, MOReceiptLine, ManufacturingOrder
+from .models import BOM, BOMLine, IoTDevice, IoTMetric, MOIssueLine, MOReceiptLine, ManufacturingOrder, ProductionPlan, ProductionQC
 
 
 class ProductionDomainService(BaseService):
@@ -37,11 +38,25 @@ class ProductionDomainService(BaseService):
             raise BusinessRuleError("Warehouse not found in company scope")
         return warehouse
 
+    def _sales_order(self, *, company_id, sales_order_id) -> SalesOrder:
+        sales_order = SalesOrder.objects.active().for_company(company_id).filter(id=sales_order_id).first()
+        if sales_order is None:
+            raise BusinessRuleError("Sales order not found in company scope")
+        return sales_order
+
     def _mo(self, *, company_id, mo_id) -> ManufacturingOrder:
         mo = ManufacturingOrder.objects.active().for_company(company_id).filter(id=mo_id).first()
         if mo is None:
             raise BusinessRuleError("Manufacturing order not found in company scope")
         return mo
+
+    def _validate_mto_alignment(self, *, mo: ManufacturingOrder):
+        if mo.production_mode != ManufacturingOrder.ProductionMode.MAKE_TO_ORDER:
+            return
+        if not mo.sales_order_id:
+            raise BusinessRuleError("MTO manufacturing order requires linked sales order")
+        if not mo.sales_order.lines.filter(material_id=mo.product_material_id).exists():
+            raise BusinessRuleError("MTO product material must exist in linked sales order lines")
 
 
 class BOMService(ProductionDomainService):
@@ -61,7 +76,6 @@ class BOMService(ProductionDomainService):
             created_by=self._user_id(user),
             updated_by=self._user_id(user),
         )
-        bom.full_clean()
         bom.save()
 
         for line in lines or []:
@@ -93,9 +107,13 @@ class ManufacturingOrderService(ProductionDomainService):
         self.ledger_service = StockLedgerService()
 
     @transaction.atomic
-    def create_order(self, *, user, company_id, doc_no, product_material_id, planned_qty, warehouse_id, start_date=None, due_date=None, request=None) -> ManufacturingOrder:
+    def create_order(self, *, user, company_id, doc_no, product_material_id, planned_qty, warehouse_id, production_mode=ManufacturingOrder.ProductionMode.MAKE_TO_STOCK, sales_order_id=None, start_date=None, due_date=None, request=None) -> ManufacturingOrder:
         self._ensure_module_enabled(company_id=company_id)
         self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
+
+        sales_order = None
+        if sales_order_id:
+            sales_order = self._sales_order(company_id=company_id, sales_order_id=sales_order_id)
 
         order = ManufacturingOrder(
             company_id=company_id,
@@ -103,12 +121,14 @@ class ManufacturingOrderService(ProductionDomainService):
             product_material=self._material(company_id=company_id, material_id=product_material_id),
             planned_qty=planned_qty,
             warehouse=self._warehouse(company_id=company_id, warehouse_id=warehouse_id),
+            production_mode=production_mode,
+            sales_order=sales_order,
             start_date=start_date,
             due_date=due_date,
             created_by=self._user_id(user),
             updated_by=self._user_id(user),
         )
-        order.full_clean()
+        self._validate_mto_alignment(mo=order)
         order.save()
         self.audit_crud(user=user, company_id=company_id, operation="create", resource_type="production.manufacturing_order", resource_id=order.id, request=request)
         return order
@@ -119,6 +139,7 @@ class ManufacturingOrderService(ProductionDomainService):
         self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_ISSUE)
 
         mo = self._mo(company_id=company_id, mo_id=mo_id)
+        self._validate_mto_alignment(mo=mo)
         material = self._material(company_id=company_id, material_id=component_material_id)
 
         reservation = None
@@ -131,6 +152,16 @@ class ManufacturingOrderService(ProductionDomainService):
             if reservation.status != Reservation.Status.ACTIVE:
                 raise BusinessRuleError("Reservation must be active before consume")
 
+        if mo.production_mode == ManufacturingOrder.ProductionMode.MAKE_TO_ORDER:
+            if reservation is None:
+                raise BusinessRuleError("MTO issue requires active reservation")
+            if issued_qty != reservation.qty:
+                raise BusinessRuleError("MTO issue requires issued_qty equal to reservation.qty")
+        else:
+            # MTS: reservation is optional; if present, must align with consume semantics.
+            if reservation is not None and issued_qty != reservation.qty:
+                raise BusinessRuleError("MTS issue with reservation requires issued_qty equal to reservation.qty")
+
         issue = MOIssueLine(
             company_id=company_id,
             mo=mo,
@@ -141,7 +172,6 @@ class ManufacturingOrderService(ProductionDomainService):
             created_by=self._user_id(user),
             updated_by=self._user_id(user),
         )
-        issue.full_clean()
         issue.save()
 
         if reservation:
@@ -169,6 +199,7 @@ class ManufacturingOrderService(ProductionDomainService):
         self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_RECEIPT)
 
         mo = self._mo(company_id=company_id, mo_id=mo_id)
+        self._validate_mto_alignment(mo=mo)
 
         receipt = MOReceiptLine(
             company_id=company_id,
@@ -179,7 +210,6 @@ class ManufacturingOrderService(ProductionDomainService):
             created_by=self._user_id(user),
             updated_by=self._user_id(user),
         )
-        receipt.full_clean()
         receipt.save()
 
         self.ledger_service.record_movement(
@@ -198,3 +228,123 @@ class ManufacturingOrderService(ProductionDomainService):
 
         self.audit_crud(user=user, company_id=company_id, operation="create", resource_type="production.mo_receipt_line", resource_id=receipt.id, request=request)
         return receipt
+
+
+class ProductionPlanService(ProductionDomainService):
+    PERM_CREATE = PERMISSION_CODES.PRODUCTION_PLAN_CREATE
+    PERM_UPDATE = PERMISSION_CODES.PRODUCTION_PLAN_UPDATE
+
+    @transaction.atomic
+    def create_plan(self, *, user, company_id, plan_date, status=ProductionPlan.Status.DRAFT, capacity_json=None, mrp_result_json=None, request=None) -> ProductionPlan:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
+
+        plan = ProductionPlan(
+            company_id=company_id,
+            plan_date=plan_date,
+            status=status,
+            capacity_json=capacity_json or {},
+            mrp_result_json=mrp_result_json or {},
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
+        )
+        plan.full_clean()
+        plan.save()
+        self.audit_crud(user=user, company_id=company_id, operation="create", resource_type="production.plan", resource_id=plan.id, request=request)
+        return plan
+
+    @transaction.atomic
+    def update_plan(self, *, user, company_id, plan_id, capacity_json=None, mrp_result_json=None, status=None, request=None) -> ProductionPlan:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_UPDATE)
+
+        plan = ProductionPlan.objects.active().for_company(company_id).filter(id=plan_id).first()
+        if plan is None:
+            raise BusinessRuleError("Production plan not found in company scope")
+
+        if capacity_json is not None:
+            plan.capacity_json = capacity_json
+        if mrp_result_json is not None:
+            plan.mrp_result_json = mrp_result_json
+        if status is not None:
+            plan.status = status
+        plan.updated_by = self._user_id(user)
+        plan.full_clean()
+        plan.save()
+
+        self.audit_crud(user=user, company_id=company_id, operation="update", resource_type="production.plan", resource_id=plan.id, request=request)
+        return plan
+
+
+class ProductionQCService(ProductionDomainService):
+    PERM_CREATE = PERMISSION_CODES.PRODUCTION_QC_CREATE
+
+    @transaction.atomic
+    def create_qc_record(self, *, user, company_id, mo_id, stage, result, inspector_id, notes="", measurements_json=None, request=None) -> ProductionQC:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
+
+        qc = ProductionQC(
+            company_id=company_id,
+            mo=self._mo(company_id=company_id, mo_id=mo_id),
+            stage=stage,
+            result=result,
+            inspector_id=inspector_id,
+            notes=notes,
+            measurements_json=measurements_json or {},
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
+        )
+        qc.save()
+        self.audit_crud(user=user, company_id=company_id, operation="create", resource_type="production.qc", resource_id=qc.id, request=request)
+        return qc
+
+
+class IoTDeviceService(ProductionDomainService):
+    PERM_CREATE = PERMISSION_CODES.PRODUCTION_IOT_DEVICE_CREATE
+
+    @transaction.atomic
+    def register_device(self, *, user, company_id, device_code, name, type, status=IoTDevice.Status.ACTIVE, bound_mo_id=None, request=None) -> IoTDevice:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
+
+        device = IoTDevice(
+            company_id=company_id,
+            device_code=device_code,
+            name=name,
+            type=type,
+            status=status,
+            bound_mo=self._mo(company_id=company_id, mo_id=bound_mo_id) if bound_mo_id else None,
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
+        )
+        device.full_clean()
+        device.save()
+        self.audit_crud(user=user, company_id=company_id, operation="create", resource_type="production.iot_device", resource_id=device.id, request=request)
+        return device
+
+
+class IoTMetricService(ProductionDomainService):
+    PERM_CREATE = PERMISSION_CODES.PRODUCTION_IOT_METRIC_CREATE
+
+    @transaction.atomic
+    def record_metric(self, *, user, company_id, device_id, metric_key, value, recorded_at, request=None) -> IoTMetric:
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_CREATE)
+
+        device = IoTDevice.objects.active().for_company(company_id).filter(id=device_id).first()
+        if device is None:
+            raise BusinessRuleError("IoT device not found in company scope")
+
+        metric = IoTMetric(
+            company_id=company_id,
+            device=device,
+            metric_key=metric_key,
+            value=value,
+            recorded_at=recorded_at,
+            created_by=self._user_id(user),
+            updated_by=self._user_id(user),
+        )
+        metric.save()
+        self.audit_crud(user=user, company_id=company_id, operation="create", resource_type="production.iot_metric", resource_id=metric.id, request=request)
+        return metric
