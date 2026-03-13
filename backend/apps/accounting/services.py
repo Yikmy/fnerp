@@ -1,14 +1,21 @@
+from datetime import date
+
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Count, F, Sum
 from django.utils import timezone
 
 from apps.purchase.models import PurchaseOrder
 from apps.sales.models import SalesOrder
+from doc.services import DocumentStateTransitionService
+from shared.constants.document import DOC_STATUS
 from shared.exceptions import BusinessRuleError
 from shared.services.base import BaseService
 from shared.services.module_guard import ModuleGuardService
+from system_config.services import SystemConfigService
 
-from .models import AccountingInvoice, AccountingPosting, Payment
+from apps.inventory.models import CostLayer as InventoryCostLayer
+
+from .models import AccountingInvoice, AccountingPosting, Payment, PeriodProductCost
 
 
 class AccountingService(BaseService):
@@ -16,6 +23,7 @@ class AccountingService(BaseService):
     PERM_POST_INVOICE = "accounting.invoice.post"
     PERM_REVERSE_POSTING = "accounting.posting.reverse"
     PERM_RECORD_PAYMENT = "accounting.payment.record"
+    COMPANY_CURRENCY_CONFIG_KEY = "default_currency"
 
     @staticmethod
     def _user_id(user):
@@ -25,10 +33,43 @@ class AccountingService(BaseService):
         if not ModuleGuardService.check_module_enabled(company_id=company_id, module_code=self.MODULE_CODE):
             raise BusinessRuleError("accounting module is disabled for this company")
 
+    def _ensure_document_postable(self, *, document_type: str, status: str, label: str):
+        state_service = DocumentStateTransitionService()
+        # Validate canonical path exists in the document state machine.
+        state_service.validate_transition(
+            document_type=document_type,
+            from_state=DOC_STATUS.DRAFT,
+            to_state=DOC_STATUS.SUBMITTED,
+        )
+        state_service.validate_transition(
+            document_type=document_type,
+            from_state=DOC_STATUS.SUBMITTED,
+            to_state=DOC_STATUS.CONFIRMED,
+        )
+        state_service.validate_transition(
+            document_type=document_type,
+            from_state=DOC_STATUS.CONFIRMED,
+            to_state=DOC_STATUS.COMPLETED,
+        )
+        if status != DOC_STATUS.COMPLETED:
+            raise BusinessRuleError(f"{label} must be in {DOC_STATUS.COMPLETED} before accounting posting")
+
+    def _resolve_company_currency(self, *, company_id):
+        currency = SystemConfigService.get(
+            key=self.COMPANY_CURRENCY_CONFIG_KEY,
+            company_id=company_id,
+            default=None,
+        )
+        if not currency or not isinstance(currency, str):
+            raise BusinessRuleError("Company default currency is not configured")
+        return currency
+
     @staticmethod
-    def _require_completed(status: str, label: str):
-        if status != "COMPLETED":
-            raise BusinessRuleError(f"{label} must be COMPLETED before accounting posting")
+    def _ensure_currency_match(*, expected_currency: str, actual_currency: str, label: str):
+        if actual_currency != expected_currency:
+            raise BusinessRuleError(
+                f"Currency mismatch for {label}: expected {expected_currency}, got {actual_currency}"
+            )
 
     @transaction.atomic
     def post_sales_invoice(self, *, user, company_id, sales_order_id, issue_date, due_date=None, request=None):
@@ -38,7 +79,9 @@ class AccountingService(BaseService):
         so = SalesOrder.objects.active().for_company(company_id).filter(id=sales_order_id).first()
         if so is None:
             raise BusinessRuleError("Sales order not found in company scope")
-        self._require_completed(so.status, "Sales order")
+        self._ensure_document_postable(document_type="sales_order", status=so.status, label="Sales order")
+
+        company_currency = self._resolve_company_currency(company_id=company_id)
 
         posting, created = AccountingPosting.objects.select_for_update().get_or_create(
             company_id=company_id,
@@ -56,7 +99,7 @@ class AccountingService(BaseService):
                     sales_order=so,
                     issue_date=issue_date,
                     due_date=due_date,
-                    currency="USD",
+                    currency=company_currency,
                     total_amount=so.total_amount,
                     status=AccountingInvoice.Status.ISSUED,
                     created_by=self._user_id(user),
@@ -83,7 +126,10 @@ class AccountingService(BaseService):
         po = PurchaseOrder.objects.active().for_company(company_id).filter(id=purchase_order_id).first()
         if po is None:
             raise BusinessRuleError("Purchase order not found in company scope")
-        self._require_completed(po.status, "Purchase order")
+        self._ensure_document_postable(document_type="purchase_order", status=po.status, label="Purchase order")
+
+        company_currency = self._resolve_company_currency(company_id=company_id)
+        self._ensure_currency_match(expected_currency=company_currency, actual_currency=po.currency, label="Purchase order")
 
         posting, created = AccountingPosting.objects.select_for_update().get_or_create(
             company_id=company_id,
@@ -144,6 +190,8 @@ class AccountingService(BaseService):
         if invoice is None:
             raise BusinessRuleError("Invoice not found in company scope")
 
+        self._ensure_currency_match(expected_currency=invoice.currency, actual_currency=currency, label="Payment")
+
         if source_ref_type and source_ref_id:
             existing = Payment.objects.active().for_company(company_id).filter(
                 source_ref_type=source_ref_type,
@@ -192,6 +240,74 @@ class AccountingService(BaseService):
             request=request,
         )
         return payment, True
+
+
+    @staticmethod
+    def _period_range(period: str):
+        try:
+            year, month = period.split("-")
+            start = date(int(year), int(month), 1)
+        except Exception as exc:
+            raise BusinessRuleError("Period must be YYYY-MM") from exc
+        if start.month == 12:
+            end_exclusive = date(start.year + 1, 1, 1)
+        else:
+            end_exclusive = date(start.year, start.month + 1, 1)
+        return start, end_exclusive
+
+    @transaction.atomic
+    def compute_period_product_costs(self, *, user, company_id, period, request=None):
+        self._ensure_module_enabled(company_id=company_id)
+        self.ensure_permission(user=user, company_id=company_id, permission_code=self.PERM_POST_INVOICE)
+
+        company_currency = self._resolve_company_currency(company_id=company_id)
+        period_start, period_end_exclusive = self._period_range(period)
+
+        rows = (
+            InventoryCostLayer.objects.active()
+            .for_company(company_id)
+            .filter(source_ledger__created_at__date__gte=period_start, source_ledger__created_at__date__lt=period_end_exclusive)
+            .values("material_id")
+            .annotate(
+                total_in_qty=Sum("in_qty"),
+                total_in_cost=Sum(F("in_qty") * F("unit_cost")),
+                ending_qty=Sum("remaining_qty"),
+                ending_cost=Sum(F("remaining_qty") * F("unit_cost")),
+                layer_count=Count("id"),
+            )
+        )
+
+        snapshots = []
+        for row in rows:
+            snapshot, _ = PeriodProductCost.objects.update_or_create(
+                company_id=company_id,
+                period=period,
+                material_id=row["material_id"],
+                defaults={
+                    "currency": company_currency,
+                    "total_in_qty": row["total_in_qty"] or 0,
+                    "total_in_cost": row["total_in_cost"] or 0,
+                    "ending_qty": row["ending_qty"] or 0,
+                    "ending_cost": row["ending_cost"] or 0,
+                    "layer_count": row["layer_count"] or 0,
+                    "updated_by": self._user_id(user),
+                    "created_by": self._user_id(user),
+                },
+            )
+            snapshots.append(snapshot)
+
+        self.audit_crud(
+            user=user,
+            company_id=company_id,
+            operation="create",
+            resource_type="accounting.period_product_cost",
+            resource_id=period,
+            request=request,
+        )
+        return snapshots
+
+    def list_period_product_costs(self, *, company_id, period):
+        return PeriodProductCost.objects.active().for_company(company_id).filter(period=period).order_by("material_id")
 
     @transaction.atomic
     def reverse_posting(self, *, user, company_id, posting_id, notes="", request=None):
