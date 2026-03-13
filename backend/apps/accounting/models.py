@@ -2,8 +2,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import models
 from django.utils import timezone
 
-from apps.inventory.models import StockLedger
-from apps.material.models import Material, Warehouse
+from apps.material.models import Material
 from apps.production.models import ManufacturingOrder
 from apps.purchase.models import PurchaseOrder
 from apps.sales.models import SalesOrder
@@ -86,35 +85,8 @@ class Payment(BaseModel):
             errors["direction"] = "Incoming payments require AR invoice."
         if self.direction == self.Direction.OUT and self.invoice_id and self.invoice.type != AccountingInvoice.InvoiceType.AP:
             errors["direction"] = "Outgoing payments require AP invoice."
-        if errors:
-            raise DjangoValidationError(errors)
-
-
-class CostLayer(BaseModel):
-    material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="accounting_cost_layers")
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="accounting_cost_layers")
-    in_qty = models.DecimalField(max_digits=20, decimal_places=6)
-    remaining_qty = models.DecimalField(max_digits=20, decimal_places=6)
-    unit_cost = models.DecimalField(max_digits=20, decimal_places=6)
-    source_ledger = models.OneToOneField(StockLedger, on_delete=models.PROTECT, related_name="accounting_cost_layer")
-
-    class Meta:
-        db_table = "acct_cost_layer"
-
-    def clean(self):
-        errors = {}
-        if self.material_id and self.material.company_id != self.company_id:
-            errors["material"] = "Material company must match cost layer company."
-        if self.warehouse_id and self.warehouse.company_id != self.company_id:
-            errors["warehouse"] = "Warehouse company must match cost layer company."
-        if self.source_ledger_id and self.source_ledger.company_id != self.company_id:
-            errors["source_ledger"] = "Source ledger company must match cost layer company."
-        if self.remaining_qty < 0:
-            errors["remaining_qty"] = "Remaining quantity cannot be negative."
-        if self.in_qty < 0:
-            errors["in_qty"] = "In quantity cannot be negative."
-        if self.remaining_qty > self.in_qty:
-            errors["remaining_qty"] = "Remaining quantity cannot exceed in quantity."
+        if self.invoice_id and self.currency and self.currency != self.invoice.currency:
+            errors["currency"] = "Payment currency must match invoice currency."
         if errors:
             raise DjangoValidationError(errors)
 
@@ -174,6 +146,39 @@ class AssetMaintenance(BaseModel):
         if errors:
             raise DjangoValidationError(errors)
 
+
+
+
+class PeriodProductCost(BaseModel):
+    period = models.CharField(max_length=7)
+    material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="period_product_costs")
+    currency = models.CharField(max_length=8)
+    total_in_qty = models.DecimalField(max_digits=20, decimal_places=6, default=0)
+    total_in_cost = models.DecimalField(max_digits=20, decimal_places=6, default=0)
+    ending_qty = models.DecimalField(max_digits=20, decimal_places=6, default=0)
+    ending_cost = models.DecimalField(max_digits=20, decimal_places=6, default=0)
+    layer_count = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = "acct_period_product_cost"
+        unique_together = (("company_id", "period", "material"),)
+
+    def clean(self):
+        errors = {}
+        if self.material_id and self.material.company_id != self.company_id:
+            errors["material"] = "Material company must match period product cost company."
+        if self.total_in_qty < 0:
+            errors["total_in_qty"] = "Total in qty cannot be negative."
+        if self.total_in_cost < 0:
+            errors["total_in_cost"] = "Total in cost cannot be negative."
+        if self.ending_qty < 0:
+            errors["ending_qty"] = "Ending qty cannot be negative."
+        if self.ending_cost < 0:
+            errors["ending_cost"] = "Ending cost cannot be negative."
+        if self.layer_count < 0:
+            errors["layer_count"] = "Layer count cannot be negative."
+        if errors:
+            raise DjangoValidationError(errors)
 
 class FinancialReportSnapshot(BaseModel):
     class ReportType(models.TextChoices):
